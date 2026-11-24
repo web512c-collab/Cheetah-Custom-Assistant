@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name">Cheetah</string>
+    <string name="assistant_full_name">Cheetah Custom Assistant</string>
+    <string name="assistant_subtitle_ar">مساعد شيتا الشخصي — أوفلاين بالكامل بالعامية المصرية</string>
+    <string name="accessibility_service_description">يسمح لمساعد شيتا بتنفيذ أوامر الشاشة اللي تطلبها بصوتك (زي الرجوع للخلف، التمرير، أو الضغط على زر معين) بعد تفعيلك الصريح.</string>
+    <string name="voice_interaction_service_label">Cheetah (شيتا)</string>
+    <string name="notification_channel_wake_word">مراقبة كلمة التنبيه (Wake Word)</string>
+    <string name="notification_channel_wake_word_desc">إشعار دائم يوضح إن شيتا بيسمع لكلمة التنبيه محلياً على جهازك بدون إنترنت.</string>
+    <string name="notification_listening_title">شيتا مستعد وبيسمع محلياً</string>
+    <string name="notification_listening_body">الاستماع أوفلاين على الجهاز لكلمة التنبيه الخاصة بك.</string>
+    <string name="notification_action_mute">كتم مؤقت</string>
+    <string name="notification_action_stop">إيقاف</string>
+</resources>

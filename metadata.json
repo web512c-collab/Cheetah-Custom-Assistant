@@ -1,0 +1,6 @@
+{
+  "name": "Cheetah Assistant",
+  "description": "100% self-contained offline Egyptian Colloquial Arabic Android personal assistant with custom wake word, local Voice Match, J.A.R.V.I.S.-inspired persona guardrails, and system assistant integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
