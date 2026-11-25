@@ -3,6 +3,7 @@
 .kotlin/
 build/
 app/build/
+dist/
 
 # Local environment & IDE
 local.properties

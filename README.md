@@ -1,6 +1,6 @@
-# Cheetah Custom Assistant (Android)
+# Cheetah Custom Assistant (Android) — v0.2.0
 
-**Cheetah Custom Assistant** is a 100% self-contained, zero-external-API native Android personal assistant (`minSdk 24` / Android 7.0+, `targetSdk 36`, Kotlin + Jetpack Compose) built natively for **Egyptian Colloquial Arabic (العامية المصرية)**.
+**Cheetah Custom Assistant** (`versionName = "0.2.0"`, `versionCode = 2`) is a 100% self-contained, zero-external-API native Android personal assistant (`minSdk 24` / Android 7.0+, `targetSdk 36`, Kotlin + Jetpack Compose) built natively for **Egyptian Colloquial Arabic (العامية المصرية)**. See [CHANGELOG.md](CHANGELOG.md) for full release notes.
 
 ### Key Capabilities
 - **Zero External APIs:** Runs completely offline on-device with no Gemini/OpenAI API keys and no `INTERNET` permission in `AndroidManifest.xml`.
@@ -23,13 +23,13 @@
 chmod +x gradlew
 
 # Run core JVM unit tests
-./gradlew :app:testDebugUnitTest --tests "com.example.CheetahCoreUnitTest" --tests "com.example.ExampleUnitTest"
+./gradlew :app:testDebugUnitTest --tests "com.example.CheetahCoreUnitTest" --tests "com.example.WakeWordBinaryModelTest" --tests "com.example.ExampleUnitTest"
 
 # Build Debug APK
 ./gradlew assembleDebug
 ```
 The Debug APK is output to:
-`app/build/outputs/apk/debug/app-debug.apk`
+`app/build/outputs/apk/debug/app-debug.apk` (signed with the persistent `debug.keystore` so v0.2.0 installs as an in-place update over earlier versions).
 
 ---
 
@@ -37,8 +37,8 @@ The Debug APK is output to:
 
 | Check Type | Scope | Status |
 |---|---|---|
-| **JVM Unit Tests** | `CheetahCoreUnitTest` (MFCC-DTW, NLU context/shortcuts/compounds, Guardrails, Phonetic folding, TTS normalization) & `ExampleUnitTest` | Passed via Gradle |
-| **Debug APK Build** | `compile_applet` & `assembleDebug` | Passed via Gradle |
+| **JVM Unit Tests** | `CheetahCoreUnitTest`, `WakeWordBinaryModelTest` (CRC32 + `'يا شيتا'` binary model inference vs noise/tone rejection), & `ExampleUnitTest` (13 tests) | Passed via Gradle |
+| **Debug APK Build** | `compile_applet` & `assembleDebug` (verifies uncompressed `assets/models/cheetah_ya_sheeta_kws.bin`) | Passed via Gradle |
 | **Robolectric / Instrumented / Hardware** | `ExampleRobolectricTest` (requires Maven artifact network access), real mic/AudioRecord, OEM `SpeechRecognizer` offline `ar-EG` pack, physical screen-off wake loop | Requires online CI runner or physical Android device |
 
 - **Android 7.0–9.0 (API 24–28):** Standard `startForeground`, `AudioRecord` pause/resume handoff before `SpeechRecognizer`, `Settings.ACTION_VOICE_INPUT_SETTINGS`.
@@ -50,5 +50,6 @@ The Debug APK is output to:
 ## GitHub Actions CI/CD (`.github/workflows/android-build.yml`)
 
 1. Uses **JDK 17 (Temurin)** and the runner's preinstalled Android SDK (`sdkmanager` installs `platform-tools`, `platforms;android-36.1`, `build-tools;36.0.0`).
-2. Runs core unit tests (`CheetahCoreUnitTest`, `ExampleUnitTest`), runs `ExampleRobolectricTest` (non-blocking), and builds `assembleDebug`.
-3. Uploads **`cheetah-debug-apk`** (`app/build/outputs/apk/debug/*.apk`), optionally builds signed release if keystore secrets are configured, and publishes GitHub Releases on `v*` tags.
+2. Decodes the shared `debug.keystore.base64` into `debug.keystore` for consistent update-compatible debug signing.
+3. Runs core unit tests (`CheetahCoreUnitTest`, `WakeWordBinaryModelTest`, `ExampleUnitTest`), runs `ExampleRobolectricTest` (non-blocking), and builds `assembleDebug`.
+4. Packages and uploads **`cheetah-debug-apk`** (`Cheetah-v0.2.0-debug.apk`), optionally builds signed release if keystore secrets are configured, and attaches `Cheetah-v0.2.0-debug.apk` to GitHub Releases on `v*` tags.
