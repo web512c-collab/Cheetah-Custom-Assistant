@@ -41,9 +41,9 @@ The workflow runs automatically on:
 - Manual trigger via **Actions → Android CI - Build APK → Run workflow**
 
 ### What the Workflow Does
-1. Sets up **JDK 17 (Temurin)**, **Android SDK** (`android-36.1` + `build-tools;36.0.0`), and **Gradle caching**.
+1. Sets up **JDK 17 (Temurin)**, uses the runner's preinstalled **Android SDK** (`sdkmanager` installs `platform-tools`, `platforms;android-36.1`, and `build-tools;36.0.0`), and configures **Gradle caching**.
 2. Ensures `gradlew` is executable and prepares `debug.keystore` for the debug signing config.
-3. Runs unit tests (`./gradlew :app:testDebugUnitTest`) and builds the Debug APK (`./gradlew assembleDebug`).
+3. Runs core unit tests (`CheetahCoreUnitTest` and `ExampleUnitTest`), runs `ExampleRobolectricTest` as a non-blocking smoke check, and builds the Debug APK (`./gradlew assembleDebug`).
 4. Uploads the Debug APK as the **`cheetah-debug-apk`** workflow artifact.
 5. **Optional Signed Release APK:** If repository secrets `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS` (set to `upload` to match `app/build.gradle.kts`), and `KEY_PASSWORD` are configured, decodes the keystore temporarily, builds `./gradlew assembleRelease`, uploads **`cheetah-release-apk`**, and deletes the temporary keystore file.
 6. **GitHub Releases:** When you push a tag matching `v*`, publishes a GitHub Release automatically with the built APK(s) attached.
