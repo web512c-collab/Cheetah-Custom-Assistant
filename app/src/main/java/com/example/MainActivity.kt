@@ -17,6 +17,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Architecture
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -26,9 +29,13 @@ import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -123,9 +130,50 @@ fun CheetahAppRoot(viewModel: AssistantViewModel = viewModel()) {
         ActivityResultContracts.RequestPermission()
     ) { viewModel.refreshPermissions() }
 
+    var showMicRationale by remember { mutableStateOf(false) }
+
     val roleLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { viewModel.refreshPermissions() }
+
+    if (showMicRationale) {
+        AlertDialog(
+            onDismissRequest = { showMicRationale = false },
+            containerColor = CheetahSlate,
+            title = {
+                Text(
+                    text = "صلاحية المايكروفون (محلياً 100%)",
+                    color = CheetahCyan
+                )
+            },
+            text = {
+                Text(
+                    text = "شيتا بيستخدم المايكروفون على جهازك فقط عشان يسمع اسم التنبيه، يتحقق من بصمة صوتك (Voice Match)، ويفهم أوامرك بالعامية المصرية أوفلاين. التطبيق مفيهوش أصلاً صلاحية إنترنت ومش بيبعت أي صوت بره موبايلك.",
+                    color = androidx.compose.ui.graphics.Color.White
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showMicRationale = false
+                        micLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = CheetahCyan),
+                    modifier = Modifier.testTag("mic_rationale_confirm_btn")
+                ) {
+                    Text("موافق، فعّل المايك", color = CheetahObsidian)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showMicRationale = false },
+                    modifier = Modifier.testTag("mic_rationale_cancel_btn")
+                ) {
+                    Text("مش دلوقتي", color = CheetahTextSecondary)
+                }
+            }
+        )
+    }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val useRail = maxWidth >= 600.dp
@@ -212,7 +260,7 @@ fun CheetahAppRoot(viewModel: AssistantViewModel = viewModel()) {
                                 onToggleContinuousListening = { viewModel.toggleContinuousListening(it) },
                                 onToggleMute = { viewModel.toggleMute() },
                                 onRequestMicPermission = {
-                                    micLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    showMicRationale = true
                                 },
                                 onOpenSettingsTab = {
                                     navController.navigate(ROUTE_SETTINGS) {
@@ -254,7 +302,7 @@ fun CheetahAppRoot(viewModel: AssistantViewModel = viewModel()) {
                                 onTestEgyptianTts = { viewModel.testEgyptianTts() },
                                 onToggleRule = { id, en -> viewModel.toggleRule(id, en) },
                                 onRequestMicPermission = {
-                                    micLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    showMicRationale = true
                                 },
                                 onRequestNotificationPermission = {
                                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

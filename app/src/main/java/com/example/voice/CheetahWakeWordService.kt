@@ -130,15 +130,22 @@ class CheetahWakeWordService : Service() {
             try {
                 recorder.startRecording()
                 while (isActive) {
+                    if (isMuted || CheetahRuntimeBus.isSttActive.value) {
+                        runCatching {
+                            if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                                recorder.stop()
+                            }
+                        }
+                        CheetahRuntimeBus.updateMicLevel(0f)
+                        delay(150)
+                        continue
+                    } else if (recorder.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                        runCatching { recorder.startRecording() }
+                    }
+
                     val read = recorder.read(chunk, 0, chunk.size)
                     if (read <= 0) {
                         delay(40)
-                        continue
-                    }
-
-                    if (isMuted) {
-                        CheetahRuntimeBus.updateMicLevel(0f)
-                        delay(120)
                         continue
                     }
 
@@ -179,6 +186,11 @@ class CheetahWakeWordService : Service() {
                                     cooldownUntilMs = System.currentTimeMillis() + 3500L
                                     triggerWakeEvent(similarity, passed)
                                 }
+                            } else if (liveVec != null && enrolledCentroid == null && activeFrames in 7..30) {
+                                // Text-typed wake mode without acoustic enrollment:
+                                // Trigger AssistActivity to verify typed wake phrase via offline STT.
+                                cooldownUntilMs = System.currentTimeMillis() + 4500L
+                                triggerWakeEvent(score = null, passed = true)
                             }
                         }
                         activeFrames = 0
@@ -192,20 +204,22 @@ class CheetahWakeWordService : Service() {
         }
     }
 
-    private fun triggerWakeEvent(score: Float, passed: Boolean) {
+    private fun triggerWakeEvent(score: Float?, passed: Boolean) {
         vibratePulse()
         CheetahRuntimeBus.emitWakeTrigger(
             WakeTriggerEvent(
                 timestampMs = System.currentTimeMillis(),
                 voiceMatchScore = score,
                 passedVoiceMatch = passed,
-                source = "FOREGROUND_ACOUSTIC_MATCH"
+                source = if (score != null) "FOREGROUND_ACOUSTIC_MATCH" else "FOREGROUND_VAD_TEXT_MODE"
             )
         )
         val assistIntent = Intent(this, CheetahAssistActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             putExtra(EXTRA_FROM_WAKE_WORD, true)
-            putExtra(EXTRA_VOICE_MATCH_SCORE, score)
+            if (score != null) {
+                putExtra(EXTRA_VOICE_MATCH_SCORE, score)
+            }
         }
         runCatching { startActivity(assistIntent) }
     }

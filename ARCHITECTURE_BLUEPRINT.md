@@ -9,8 +9,8 @@
    - `CheetahRecognitionService` (`RecognitionService` contract).
    - `CheetahAssistActivity` handling `Intent.ACTION_ASSIST`, `Intent.ACTION_VOICE_COMMAND`, and wake-word triggers.
 2. **`voice-pipeline` (`com.example.voice`)**
-   - `CheetahWakeWordService`: Foreground Service (`foregroundServiceType="microphone"`) running 16kHz PCM `AudioRecord` ring-buffer VAD with live notification Mute/Stop kill-switch.
-   - `AudioFeatureExtractor` & `WakeWordEnrollmentRecorder`: 12-band Goertzel spectral energy + ZCR + spectral centroid cosine-similarity Voice Match verification stored locally in `filesDir/cheetah_voice_templates.json`.
+   - `CheetahWakeWordService`: Foreground Service (`foregroundServiceType="microphone"`) running 16kHz PCM `AudioRecord` ring-buffer VAD with live notification Mute/Stop kill-switch, pausing capture automatically via `CheetahRuntimeBus.isSttActive` during active STT to avoid single-mic contention on Android 7.0–9.0.
+   - `AudioFeatureExtractor` & `WakeWordEnrollmentRecorder`: 12-band Goertzel spectral energy + ZCR + spectral centroid cosine-similarity Voice Match verification stored locally in `filesDir/cheetah_voice_templates.json` (plus Text-Typed VAD fallback triggering).
    - `EgyptianPhoneticNormalizer`: Egyptian Colloquial Arabic phonetic folding (`ث->س`, `ذ->ز`, `ق->ا`, `ة->ه`, `أ/إ/آ->ا`, English/Arabized transliteration) + fuzzy Levenshtein wake matching.
    - `EgyptianOfflineSttManager`: Uses `SpeechRecognizer.createOnDeviceSpeechRecognizer` (API 31+) or `EXTRA_PREFER_OFFLINE = true` with `ar-EG`.
    - `EgyptianTtsManager`: Uses `TextToSpeech` tuned to `Locale.forLanguageTag("ar-EG")` with configurable rate & pitch.

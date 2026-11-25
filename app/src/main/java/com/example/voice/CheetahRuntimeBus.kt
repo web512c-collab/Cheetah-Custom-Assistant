@@ -17,11 +17,14 @@ data class WakeTriggerEvent(
 
 /**
  * In-process reactive telemetry bus bridging the Foreground WakeWordService,
- * VoiceInteractionSession, and Jetpack Compose Console/Settings UI.
+ * VoiceInteractionSession, AssistActivity, and Jetpack Compose Console/Settings UI.
  */
 object CheetahRuntimeBus {
     private val _serviceRunning = MutableStateFlow(false)
     val serviceRunning: StateFlow<Boolean> = _serviceRunning.asStateFlow()
+
+    private val _isSttActive = MutableStateFlow(false)
+    val isSttActive: StateFlow<Boolean> = _isSttActive.asStateFlow()
 
     private val _liveMicLevel = MutableStateFlow(0f)
     val liveMicLevel: StateFlow<Float> = _liveMicLevel.asStateFlow()
@@ -43,6 +46,10 @@ object CheetahRuntimeBus {
                 _pipelineState.value = AssistantPipelineState.IDLE
             }
         }
+    }
+
+    fun setSttActive(active: Boolean) {
+        _isSttActive.value = active
     }
 
     fun updateMicLevel(level: Float) {

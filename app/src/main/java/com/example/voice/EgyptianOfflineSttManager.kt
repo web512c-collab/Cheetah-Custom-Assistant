@@ -54,6 +54,7 @@ class EgyptianOfflineSttManager(private val context: Context) {
             return
         }
 
+        CheetahRuntimeBus.setSttActive(true)
         recognizer = created
         created.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) = Unit
@@ -69,6 +70,7 @@ class EgyptianOfflineSttManager(private val context: Context) {
             }
 
             override fun onError(error: Int) {
+                CheetahRuntimeBus.setSttActive(false)
                 onRmsDb(0f)
                 val msg = when (error) {
                     SpeechRecognizer.ERROR_NO_MATCH -> "مافهمتش الكلام كويس، ممكن تعيده بالعامية المصرية؟"
@@ -81,6 +83,7 @@ class EgyptianOfflineSttManager(private val context: Context) {
             }
 
             override fun onResults(results: Bundle?) {
+                CheetahRuntimeBus.setSttActive(false)
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 val best = matches?.firstOrNull()?.trim().orEmpty()
                 if (best.isEmpty()) {
@@ -117,11 +120,13 @@ class EgyptianOfflineSttManager(private val context: Context) {
         runCatching {
             created.startListening(intent)
         }.onFailure {
+            CheetahRuntimeBus.setSttActive(false)
             onError("تعذر تشغيل المايكروفون للتعرف على الكلام.")
         }
     }
 
     fun stopAndRelease() {
+        CheetahRuntimeBus.setSttActive(false)
         runCatching {
             recognizer?.stopListening()
             recognizer?.destroy()
