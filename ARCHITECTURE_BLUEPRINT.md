@@ -6,40 +6,39 @@
 ### Modular Pipeline
 1. **`assistant-system` (`com.example.assistant`)**
    - `CheetahVoiceInteractionService` (`VoiceInteractionService`) + `CheetahVoiceInteractionSessionService` + `CheetahVoiceInteractionSession` (`res/xml/voice_interaction_service.xml`, `res/layout/assistant_session_overlay.xml`).
-   - `CheetahRecognitionService` (`RecognitionService` contract).
-   - `CheetahAssistActivity` handling `Intent.ACTION_ASSIST`, `Intent.ACTION_VOICE_COMMAND`, and wake-word triggers.
+   - `CheetahRecognitionService`: local `RecognitionService` bridging to `EgyptianOfflineSttManager`.
+   - `CheetahAssistActivity` handling `Intent.ACTION_ASSIST` and `Intent.ACTION_VOICE_COMMAND`.
 2. **`voice-pipeline` (`com.example.voice`)**
-   - `CheetahWakeWordService`: Foreground Service (`foregroundServiceType="microphone"`) running 16kHz PCM `AudioRecord` ring-buffer VAD with live notification Mute/Stop kill-switch, pausing capture automatically via `CheetahRuntimeBus.isSttActive` during active STT to avoid single-mic contention on Android 7.0–9.0.
-   - `AudioFeatureExtractor` & `WakeWordEnrollmentRecorder`: 12-band Goertzel spectral energy + ZCR + spectral centroid cosine-similarity Voice Match verification stored locally in `filesDir/cheetah_voice_templates.json` (plus Text-Typed VAD fallback triggering).
+   - `WakeWordDetectionService` (with `CheetahWakeWordService` compatibility delegate): Foreground Service (`foregroundServiceType="microphone"`) with `VOICE_RECOGNITION` -> `MIC` fallback, adaptive noise-floor calibration, hysteresis VAD with 200ms pre-roll, and a **full in-service hands-free post-wake loop** (pause `AudioRecord` -> `AudioFocus` -> Egyptian TTS ack -> Main-Looper `EgyptianOfflineSttManager.listenOnce` -> NLU/Guardrails/Executor -> TTS reply -> 250ms echo guard -> resume `AudioRecord`).
+   - `BundledYaSheetaAcousticModel`, `AudioFeatureExtractor` & `WakeWordEngine`: Loads `assets/models/cheetah_ya_sheeta_kws.bin` (`CHKW` v1 Int8-quantized 64->32->2 MLP + canonical 24x13 MFCC contour trained on synthesized phonetic realizations of `'يا شيتا'`, CRC32-verified and memory-mapped uncompressed via `MappedByteBuffer`), combined with 16kHz 13-CMVN MFCC + Sakoe-Chiba banded DTW user personalization and 14-D Goertzel spectral/ZCR Voice Match speaker verification (`filesDir/cheetah_voice_templates.json`, excluded from cloud backup).
+   - `BootCompletedReceiver`: Auto-starts `WakeWordDetectionService` on API 24–33 and posts a compliant one-tap resume notification on API 34+.
    - `EgyptianPhoneticNormalizer`: Egyptian Colloquial Arabic phonetic folding (`ث->س`, `ذ->ز`, `ق->ا`, `ة->ه`, `أ/إ/آ->ا`, English/Arabized transliteration) + fuzzy Levenshtein wake matching.
-   - `EgyptianOfflineSttManager`: Uses `SpeechRecognizer.createOnDeviceSpeechRecognizer` (API 31+) or `EXTRA_PREFER_OFFLINE = true` with `ar-EG`.
-   - `EgyptianTtsManager`: Uses `TextToSpeech` tuned to `Locale.forLanguageTag("ar-EG")` with configurable rate & pitch.
-3. **`local-intelligence` (`com.example.intelligence`)**
-   - `EgyptianColloquialNluParser`: Deterministic + fuzzy Egyptian dialect parser (YouTube playback, Google web search, app opening via Egyptian aliases, volume/media keys, Wi-Fi/BT/Location panels, Egyptian number words for alarms/timers, calls/SMS preparation, offline battery/time status, Accessibility UI commands).
+   - `EgyptianOfflineSttManager`: Main-Looper-dispatched `SpeechRecognizer` using `createOnDeviceSpeechRecognizer` (API 31+) or `EXTRA_PREFER_OFFLINE = true` with `ar-EG`, timeout guard, and honest `OfflineSttStatus` capability inspection.
+   - `EgyptianTtsManager`: `TextToSpeech` inspecting offline `ar-EG`/`ar` voices (`!isNetworkConnectionRequired`), `AudioAttributes(USAGE_ASSISTANT, CONTENT_TYPE_SPEECH)`, transient `AudioFocus`, and Arabic speech text cleanup.
+3. **`local-intelligence` (`com.example.intelligence` & `com.example.data`)**
+   - `ConversationMemoryStore`: Persistent local text-only memory & personal shortcuts (`filesDir/cheetah_memory.json`, excluded from cloud backup).
+   - `EgyptianColloquialNluParser`: Deterministic + fuzzy Egyptian dialect parser with contextual follow-ups (`ActiveAppContext`), memory recall, close-app guidance, compound commands, personal shortcuts, and Arabic+English code-switching.
    - `JarvisEgyptianResponder`: Authentic Egyptian Colloquial Arabic replies across 3 J.A.R.V.I.S.-inspired personas (`JARVIS_FORMAL_EGYPTIAN`, `FRIENDLY_EGYPTIAN`, `CONCISE_TACTICAL`).
 4. **`persona-guardrails` (`com.example.guardrails`)**
    - `CommandGuardrailValidator`: Deterministic typed allowlist enforcing locked **Hard End-Line Rules** (financial transfers/OTP block, destructive wipe/uninstall block, credential protection) and configurable gates (Voice Match for comms, dialer confirmation, Accessibility automation toggle).
 5. **`device-controller` (`com.example.controller`)**
-   - `PackageResolver`: `<queries>`-compliant app resolution for Egyptian/Arabized names.
-   - `DeviceActionExecutor`: Executes real Android Intents (`ACTION_WEB_SEARCH`, YouTube search, `ACTION_SET_ALARM`/`ACTION_SET_TIMER`, `ACTION_DIAL`, `ACTION_SENDTO`, `Settings.Panel`, `AudioManager`).
-   - `CheetahAccessibilityService`: Permission-gated screen scroll, back, home, and visible label tap.
-   - `PermissionHealthChecker`: Live inspection + one-tap System Settings launchers (`RoleManager.ROLE_ASSISTANT`, `ACTION_VOICE_INPUT_SETTINGS`, `ACTION_ACCESSIBILITY_SETTINGS`, `ACTION_MANAGE_OVERLAY_PERMISSION`, `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`).
+   - `PackageResolver`, `DeviceActionExecutor`, `CheetahAccessibilityService`, `PermissionHealthChecker`.
 6. **`settings-ui` (`com.example.ui`)**
-   - `ConsoleScreen`, `SettingsScreen`, and `ArchitectureScreen` built with Jetpack Compose Material 3 + bundled `Cairo` Arabic/Latin font.
+   - `ConsoleScreen`, `SettingsScreen` + `SettingsDiagnosticsAndMemory` (16-point settings, live 12-field Wake-Word Diagnostic Console, Memory & Shortcuts Manager), and `ArchitectureScreen`.
 
 ---
 
-## 2. Optional Native Offline Model Packaging (Upgrading Beyond Built-in Kotlin DSP + System Offline `ar-EG`)
-The shipped codebase runs immediately on Android 7.0+ with a ~12 MB footprint. To embed heavier C++/ONNX offline speech or quantized SLM binaries:
-- Place ABI-specific `.so` files (`arm64-v8a`, `armeabi-v7a`) in `app/src/main/jniLibs/<abi>/` and acoustic/model assets under `app/src/main/assets/models/`.
-- **Offline Wake Word / Speaker ID (`Porcupine` / `Sherpa-ONNX` KWS + Wespeaker):** ~6–15 MB assets, ~25–45 MB RAM.
-- **Offline Egyptian STT (`Vosk` / `Whisper.cpp` tiny/base / `Sherpa-ONNX` Arabic):** ~45–140 MB assets, ~140–280 MB RAM.
-- **Quantized Local SLM (`llama.cpp` JNI with Q4_K_M 1B–3B model):** ~650 MB–1.8 GB asset pack (via Play Asset Delivery), requires 4–6 GB+ device RAM.
+## 2. Optional Native Offline Model Packaging
+The shipped codebase runs immediately on Android 7.0+ with a lightweight pure-Kotlin footprint. To embed heavier C++/ONNX offline speech or quantized SLM binaries:
+- Place ABI-specific `.so` files (`arm64-v8a`, `armeabi-v7a`) in `app/src/main/jniLibs/<abi>/` and assets under `app/src/main/assets/models/`.
+- **Offline Wake Word / Speaker ID (`Porcupine` / `Sherpa-ONNX`):** ~6–15 MB assets, ~25–45 MB RAM.
+- **Offline Egyptian STT (`Vosk` / `Whisper.cpp` / `Sherpa-ONNX`):** ~45–140 MB assets, ~140–280 MB RAM.
+- **Quantized Local SLM (`llama.cpp` JNI Q4_K_M 1B–3B):** ~650 MB–1.8 GB asset pack, requires 4–6 GB+ RAM.
 
 ---
 
 ## 3. Honest Engineering Trade-Offs & Android OS Limits
-- **Android Sandbox & `FLAG_SECURE`:** `AccessibilityService` cannot inspect or interact with banking apps, password managers, or `FLAG_SECURE` windows. Cheetah explicitly blocks financial/OTP commands at the guardrail layer.
-- **Calls & SMS:** Cheetah uses `Intent.ACTION_DIAL` and `Intent.ACTION_SENDTO` so the user manually confirms calls/messages instead of requesting high-risk `CALL_PHONE` / `SEND_SMS` permissions.
-- **OEM Background Throttling (Android 7.0+):** Xiaomi MIUI/HyperOS, Samsung OneUI, Oppo ColorOS, and Huawei EMUI aggressively kill background services under Doze. Cheetah mitigates this via `FOREGROUND_SERVICE_MICROPHONE`, explicit Battery Optimization exemption requests, and OEM Autostart guidance in Settings.
-- **Package Visibility (Android 11+):** Uses Play-policy-compliant `<queries>` declarations in `AndroidManifest.xml` instead of `QUERY_ALL_PACKAGES`.
+- **Android Sandbox & `FLAG_SECURE`:** `AccessibilityService` cannot inspect or interact with banking apps, password managers, or `FLAG_SECURE` windows. Cheetah blocks financial/OTP commands at the guardrail layer and cannot force-stop third-party apps (offering `GLOBAL_ACTION_HOME` when Accessibility is enabled).
+- **Calls & SMS:** Uses `Intent.ACTION_DIAL` and `Intent.ACTION_SENDTO` for manual user confirmation rather than high-risk `CALL_PHONE` / `SEND_SMS`.
+- **Android 14+ Boot FGS Restriction:** `BOOT_COMPLETED` cannot launch a `microphone` foreground service directly on API 34+; `BootCompletedReceiver` posts a one-tap notification instead.
+- **Privacy & Backups:** `backup_rules.xml` and `data_extraction_rules.xml` exclude `cheetah_voice_templates.json` and `cheetah_memory.json` from cloud backups and device transfers.

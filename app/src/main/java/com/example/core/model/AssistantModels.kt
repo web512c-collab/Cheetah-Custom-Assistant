@@ -1,8 +1,8 @@
 package com.example.core.model
 
 enum class WakeWordSetupMode(val labelAr: String, val labelEn: String) {
-    VOICE_RECORDED("تسجيل صوتي", "Voice Enrolled"),
-    TEXT_TYPED("كتابة نصية", "Text Typed"),
+    VOICE_RECORDED("نموذج صوتي محلي (MFCC-DTW)", "Acoustic MFCC-DTW"),
+    TEXT_TYPED("نص فقط (يتطلب تحقق STT)", "Text-Only (STT Match)"),
     HYBRID("صوتي + نصي", "Hybrid Voice & Text")
 }
 
@@ -32,6 +32,7 @@ enum class AssistantPipelineState(val labelAr: String, val labelEn: String) {
     IDLE("في وضع الاستعداد", "STANDBY"),
     LISTENING_WAKE_WORD("بيسمع لكلمة التنبيه أوفلاين...", "WAKE_LISTENING"),
     VERIFYING_VOICE_MATCH("بيتحقق من بصمة الصوت...", "VOICE_MATCH"),
+    WAKE_ACKNOWLEDGED("أيوه، معاك...", "WAKE_ACK"),
     LISTENING_COMMAND("سامعك، قول أمرك...", "COMMAND_STT"),
     THINKING_LOCAL("بيحلل الأمر محلياً...", "LOCAL_NLU"),
     EXECUTING_ACTION("بينفذ الأمر...", "EXECUTING"),
@@ -39,6 +40,23 @@ enum class AssistantPipelineState(val labelAr: String, val labelEn: String) {
     BLOCKED_BY_GUARDRAIL("مرفوض — خط أحمر أمني", "END_LINE_BLOCKED"),
     ERROR("حصل مشكلة بسيطة", "ERROR")
 }
+
+data class WakeDiagnosticSnapshot(
+    val audioRecordStatus: String = "STOPPED",
+    val audioSourceUsed: String = "NONE",
+    val sampleRateHz: Int = 16000,
+    val wakeEngineStatus: String = "UNINITIALIZED",
+    val modelStatus: String = "CHKW-v1 ('يا شيتا') + 0/3 MFCC",
+    val detectionThreshold: Float = 0.58f,
+    val lastConfidence: Float? = null,
+    val lastVoiceMatchScore: Float? = null,
+    val lastVoiceMatchResult: String = "N/A",
+    val lastAudioEvent: String = "لا يوجد نشاط بعد",
+    val lastWakeTimestampMs: Long? = null,
+    val lastError: String? = null,
+    val falseActivationsCount: Int = 0,
+    val ambientNoiseRms: Float = 0f
+)
 
 data class EndLineRule(
     val id: String,
@@ -80,7 +98,7 @@ data class EndLineRule(
             EndLineRule(
                 id = RULE_REQUIRE_VOICE_MATCH_COMMS,
                 titleAr = "بصمة الصوت للأوامر الحساسة",
-                descriptionAr = "التحقق من صوت المالك قبل فتح شاشة المكالمات أو التحكم بالشاشة.",
+                descriptionAr = "التحقق من صوت المالك قبل فتح شاشة المكالمات أو التحكم بالشاشة (مع بديل آمن).",
                 isHardLocked = false,
                 isEnabled = true
             ),
@@ -106,6 +124,7 @@ data class VoiceTemplateSample(
     val id: String,
     val label: String,
     val featureVector: FloatArray,
+    val mfccSequence: List<FloatArray> = emptyList(),
     val durationMs: Long,
     val peakRms: Float,
     val timestampMs: Long
@@ -128,7 +147,9 @@ data class AssistantSettings(
     val wakeSetupMode: WakeWordSetupMode = WakeWordSetupMode.TEXT_TYPED,
     val wakeSensitivity: Float = 0.65f,
     val voiceMatchEnabled: Boolean = true,
-    val voiceMatchThreshold: Float = 0.72f,
+    val voiceMatchThreshold: Float = 0.68f,
+    val allowOwnerFallbackOnLowVoiceMatch: Boolean = true,
+    val wakeAckPhrase: String = "أيوه، معاك",
     val personaTone: PersonaTone = PersonaTone.JARVIS_FORMAL_EGYPTIAN,
     val ttsSpeechRate: Float = 1.0f,
     val ttsPitch: Float = 0.96f,
@@ -187,9 +208,43 @@ enum class UiActionType(val labelAr: String) {
     TAP_TEXT("الضغط على عنصر")
 }
 
+enum class ActiveAppContext {
+    NONE,
+    YOUTUBE,
+    BROWSER,
+    WHATSAPP,
+    SETTINGS
+}
+
+data class ConversationMemoryEntry(
+    val id: Long,
+    val userText: String,
+    val assistantReply: String,
+    val intentCategory: String,
+    val activeContext: ActiveAppContext,
+    val timestampMs: Long
+)
+
+data class PersonalShortcut(
+    val id: String,
+    val triggerPhrase: String,
+    val mappedCommand: String
+)
+
+data class ConversationContextState(
+    val activeAppContext: ActiveAppContext = ActiveAppContext.NONE,
+    val lastSearchQuery: String? = null,
+    val lastOpenedApp: String? = null,
+    val recentEntries: List<ConversationMemoryEntry> = emptyList(),
+    val shortcuts: List<PersonalShortcut> = emptyList()
+)
+
 sealed class EgyptianIntent(val categoryName: String) {
     data class OpenApp(val appQuery: String, val resolvedPackage: String? = null) :
         EgyptianIntent("OPEN_APP")
+
+    data class CloseCurrentApp(val appHint: String? = null) :
+        EgyptianIntent("CLOSE_APP")
 
     data class YouTubeSearchPlay(val query: String, val autoPlayHint: Boolean = true) :
         EgyptianIntent("YOUTUBE_PLAY")
@@ -217,6 +272,11 @@ sealed class EgyptianIntent(val categoryName: String) {
     ) : EgyptianIntent("COMM_INTENT")
 
     data object SystemStatusBriefing : EgyptianIntent("SYSTEM_STATUS")
+
+    data object RecallConversationContext : EgyptianIntent("MEMORY_RECALL")
+
+    data class CompoundCommands(val steps: List<EgyptianIntent>) :
+        EgyptianIntent("COMPOUND")
 
     data class AccessibilityUiAction(
         val actionType: UiActionType,

@@ -58,7 +58,7 @@ jobs:
           fi
 
       - name: Run core JVM unit tests
-        run: ./gradlew :app:testDebugUnitTest --tests "com.example.CheetahCoreUnitTest" --tests "com.example.ExampleUnitTest" --no-daemon
+        run: ./gradlew :app:testDebugUnitTest --tests "com.example.CheetahCoreUnitTest" --tests "com.example.WakeWordBinaryModelTest" --tests "com.example.ExampleUnitTest" --no-daemon
 
       - name: Run Robolectric smoke test (non-blocking)
         continue-on-error: true

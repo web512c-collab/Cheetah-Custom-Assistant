@@ -28,6 +28,8 @@ class SettingsRepository(private val context: Context) {
         val WAKE_SENSITIVITY = floatPreferencesKey("wake_sensitivity")
         val VOICE_MATCH_ENABLED = booleanPreferencesKey("voice_match_enabled")
         val VOICE_MATCH_THRESHOLD = floatPreferencesKey("voice_match_threshold")
+        val VOICE_MATCH_FALLBACK = booleanPreferencesKey("voice_match_fallback")
+        val WAKE_ACK_PHRASE = stringPreferencesKey("wake_ack_phrase")
         val PERSONA_TONE = stringPreferencesKey("persona_tone")
         val TTS_RATE = floatPreferencesKey("tts_rate")
         val TTS_PITCH = floatPreferencesKey("tts_pitch")
@@ -46,7 +48,9 @@ class SettingsRepository(private val context: Context) {
             } ?: WakeWordSetupMode.TEXT_TYPED,
             wakeSensitivity = prefs[Keys.WAKE_SENSITIVITY] ?: 0.65f,
             voiceMatchEnabled = prefs[Keys.VOICE_MATCH_ENABLED] ?: true,
-            voiceMatchThreshold = prefs[Keys.VOICE_MATCH_THRESHOLD] ?: 0.72f,
+            voiceMatchThreshold = prefs[Keys.VOICE_MATCH_THRESHOLD] ?: 0.68f,
+            allowOwnerFallbackOnLowVoiceMatch = prefs[Keys.VOICE_MATCH_FALLBACK] ?: true,
+            wakeAckPhrase = prefs[Keys.WAKE_ACK_PHRASE]?.takeIf { it.isNotBlank() } ?: "أيوه، معاك",
             personaTone = prefs[Keys.PERSONA_TONE]?.let {
                 runCatching { PersonaTone.valueOf(it) }.getOrNull()
             } ?: PersonaTone.JARVIS_FORMAL_EGYPTIAN,
@@ -96,12 +100,26 @@ class SettingsRepository(private val context: Context) {
         }
     }
 
-    suspend fun updateVoiceMatch(enabled: Boolean, threshold: Float? = null) {
+    suspend fun updateVoiceMatch(
+        enabled: Boolean,
+        threshold: Float? = null,
+        allowFallback: Boolean? = null
+    ) {
         context.cheetahDataStore.edit { prefs ->
             prefs[Keys.VOICE_MATCH_ENABLED] = enabled
             if (threshold != null) {
-                prefs[Keys.VOICE_MATCH_THRESHOLD] = threshold.coerceIn(0.50f, 0.92f)
+                prefs[Keys.VOICE_MATCH_THRESHOLD] = threshold.coerceIn(0.45f, 0.90f)
             }
+            if (allowFallback != null) {
+                prefs[Keys.VOICE_MATCH_FALLBACK] = allowFallback
+            }
+        }
+    }
+
+    suspend fun updateWakeAckPhrase(phrase: String) {
+        val sanitized = phrase.trim().ifEmpty { "أيوه، معاك" }
+        context.cheetahDataStore.edit { prefs ->
+            prefs[Keys.WAKE_ACK_PHRASE] = sanitized
         }
     }
 

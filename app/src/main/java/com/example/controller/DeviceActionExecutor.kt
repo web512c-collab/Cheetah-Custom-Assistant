@@ -11,7 +11,9 @@ import android.os.SystemClock
 import android.provider.AlarmClock
 import android.provider.Settings
 import android.view.KeyEvent
+import com.example.core.model.ActiveAppContext
 import com.example.core.model.CommMode
+import com.example.core.model.ConversationContextState
 import com.example.core.model.EgyptianIntent
 import com.example.core.model.MediaAction
 import com.example.core.model.PersonaTone
@@ -24,7 +26,10 @@ import java.util.Locale
 
 data class ActionExecutionResult(
     val succeeded: Boolean,
-    val replyAr: String
+    val replyAr: String,
+    val newAppContext: ActiveAppContext? = null,
+    val newSearchQuery: String? = null,
+    val newOpenedApp: String? = null
 )
 
 /**
@@ -35,10 +40,12 @@ object DeviceActionExecutor {
     fun execute(
         context: Context,
         intent: EgyptianIntent,
-        tone: PersonaTone
+        tone: PersonaTone,
+        memoryState: ConversationContextState = ConversationContextState()
     ): ActionExecutionResult {
         return when (intent) {
             is EgyptianIntent.OpenApp -> executeOpenApp(context, intent, tone)
+            is EgyptianIntent.CloseCurrentApp -> executeCloseCurrentApp(intent, tone)
             is EgyptianIntent.YouTubeSearchPlay -> executeYouTube(context, intent, tone)
             is EgyptianIntent.WebSearch -> executeWebSearch(context, intent, tone)
             is EgyptianIntent.MediaControl -> executeMediaControl(context, intent, tone)
@@ -46,6 +53,8 @@ object DeviceActionExecutor {
             is EgyptianIntent.SetAlarmOrTimer -> executeAlarmOrTimer(context, intent, tone)
             is EgyptianIntent.CallOrMessageIntent -> executeCommIntent(context, intent, tone)
             is EgyptianIntent.SystemStatusBriefing -> executeSystemBriefing(context, tone)
+            is EgyptianIntent.RecallConversationContext -> executeMemoryRecall(memoryState, tone)
+            is EgyptianIntent.CompoundCommands -> executeCompound(context, intent, tone, memoryState)
             is EgyptianIntent.AccessibilityUiAction -> executeAccessibility(intent, tone)
             is EgyptianIntent.SmallTalkOrPersona -> ActionExecutionResult(
                 succeeded = true,
@@ -77,17 +86,50 @@ object DeviceActionExecutor {
         launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         return runCatching {
             context.startActivity(launchIntent)
+            val appCtx = when (pkg) {
+                "com.google.android.youtube" -> ActiveAppContext.YOUTUBE
+                "com.android.chrome" -> ActiveAppContext.BROWSER
+                "com.whatsapp", "com.whatsapp.w4b" -> ActiveAppContext.WHATSAPP
+                "com.android.settings", "settings" -> ActiveAppContext.SETTINGS
+                else -> ActiveAppContext.NONE
+            }
             ActionExecutionResult(
                 succeeded = true,
                 replyAr = JarvisEgyptianResponder.formatSuccessReply(
                     intent.copy(resolvedPackage = pkg),
                     tone
-                )
+                ),
+                newAppContext = appCtx,
+                newOpenedApp = intent.appQuery
             )
         }.getOrElse {
             ActionExecutionResult(
                 succeeded = false,
                 replyAr = "ماقدرتش أفتح «${intent.appQuery}» بسبب قيود النظام."
+            )
+        }
+    }
+
+    private fun executeCloseCurrentApp(
+        intent: EgyptianIntent.CloseCurrentApp,
+        tone: PersonaTone
+    ): ActionExecutionResult {
+        val service = CheetahAccessibilityService.activeInstance
+            ?: return ActionExecutionResult(
+                succeeded = false,
+                replyAr = "أندرويد بيمنع قفل التطبيقات التانية من غير خدمة إمكانية الوصول (Accessibility)."
+            )
+        val ok = service.performHome()
+        return if (ok) {
+            ActionExecutionResult(
+                succeeded = true,
+                replyAr = JarvisEgyptianResponder.formatSuccessReply(intent, tone),
+                newAppContext = ActiveAppContext.NONE
+            )
+        } else {
+            ActionExecutionResult(
+                succeeded = false,
+                replyAr = "ماقدرتش أرجع للشاشة الرئيسية دلوقتي."
             )
         }
     }
@@ -125,7 +167,10 @@ object DeviceActionExecutor {
         }
         return ActionExecutionResult(
             succeeded = true,
-            replyAr = JarvisEgyptianResponder.formatSuccessReply(intent, tone)
+            replyAr = JarvisEgyptianResponder.formatSuccessReply(intent, tone),
+            newAppContext = ActiveAppContext.YOUTUBE,
+            newSearchQuery = intent.query,
+            newOpenedApp = "يوتيوب"
         )
     }
 
@@ -161,7 +206,9 @@ object DeviceActionExecutor {
         }
         return ActionExecutionResult(
             succeeded = true,
-            replyAr = JarvisEgyptianResponder.formatSuccessReply(intent, tone)
+            replyAr = JarvisEgyptianResponder.formatSuccessReply(intent, tone),
+            newAppContext = ActiveAppContext.BROWSER,
+            newSearchQuery = intent.query
         )
     }
 
@@ -241,7 +288,8 @@ object DeviceActionExecutor {
             context.startActivity(panelIntent)
             ActionExecutionResult(
                 succeeded = true,
-                replyAr = JarvisEgyptianResponder.formatSuccessReply(intent, tone)
+                replyAr = JarvisEgyptianResponder.formatSuccessReply(intent, tone),
+                newAppContext = ActiveAppContext.SETTINGS
             )
         }.getOrElse {
             ActionExecutionResult(false, "ماقدرتش أفتح لوحة الإعدادات المطلوبة.")
@@ -325,6 +373,61 @@ object DeviceActionExecutor {
                 "$timeStr | بطارية $batteryPct% | أوفلاين جاهز."
         }
         return ActionExecutionResult(succeeded = true, replyAr = reply)
+    }
+
+    private fun executeMemoryRecall(
+        memoryState: ConversationContextState,
+        tone: PersonaTone
+    ): ActionExecutionResult {
+        val last = memoryState.recentEntries.firstOrNull {
+            it.intentCategory != "MEMORY_RECALL"
+        }
+        val reply = if (last == null) {
+            when (tone) {
+                PersonaTone.JARVIS_FORMAL_EGYPTIAN -> "لسه مفيش محادثات سابقة متسجلة في الذاكرة المحلية يا فندم."
+                PersonaTone.FRIENDLY_EGYPTIAN -> "لسه مبدأناش نحكي في حاجة قبل كده!"
+                PersonaTone.CONCISE_TACTICAL -> "الذاكرة المحلية فارغة."
+            }
+        } else {
+            val contextHint = when (memoryState.activeAppContext) {
+                ActiveAppContext.YOUTUBE -> " (وآخر سياق كان يوتيوب)"
+                ActiveAppContext.BROWSER -> " (وآخر سياق كان البحث)"
+                ActiveAppContext.WHATSAPP -> " (وآخر سياق كان واتساب)"
+                ActiveAppContext.SETTINGS -> " (وآخر سياق كان الإعدادات)"
+                ActiveAppContext.NONE -> ""
+            }
+            "آخر حاجة طلبتها كانت «${last.userText}»$contextHint يا فندم."
+        }
+        return ActionExecutionResult(succeeded = true, replyAr = reply)
+    }
+
+    private fun executeCompound(
+        context: Context,
+        intent: EgyptianIntent.CompoundCommands,
+        tone: PersonaTone,
+        memoryState: ConversationContextState
+    ): ActionExecutionResult {
+        var currentCtx: ActiveAppContext? = null
+        var currentSearch: String? = null
+        var currentApp: String? = null
+        val replies = mutableListOf<String>()
+        var allSucceeded = true
+
+        for (step in intent.steps) {
+            val res = execute(context, step, tone, memoryState)
+            if (!res.succeeded) allSucceeded = false
+            replies.add(res.replyAr)
+            res.newAppContext?.let { currentCtx = it }
+            res.newSearchQuery?.let { currentSearch = it }
+            res.newOpenedApp?.let { currentApp = it }
+        }
+        return ActionExecutionResult(
+            succeeded = allSucceeded,
+            replyAr = replies.joinToString(" • "),
+            newAppContext = currentCtx,
+            newSearchQuery = currentSearch,
+            newOpenedApp = currentApp
+        )
     }
 
     private fun executeAccessibility(

@@ -44,11 +44,12 @@ import com.example.ui.theme.CheetahObsidian
 import com.example.ui.theme.CheetahCyan
 import com.example.ui.theme.CheetahTextPrimary
 import com.example.ui.theme.CheetahTextSecondary
+import com.example.voice.OfflineSttStatus
 import com.example.voice.TtsStatus
 
 @Composable
 fun ArchitectureScreen(
-    isOnDeviceSttSupported: Boolean,
+    offlineSttStatus: OfflineSttStatus,
     ttsStatus: TtsStatus,
     enrolledTemplatesCount: Int
 ) {
@@ -94,16 +95,21 @@ fun ArchitectureScreen(
                     DiagnosticRow("Gemini / Cloud LLM SDKs", "معطّلة ومحذوفة تماماً", CheetahEmerald)
                     DiagnosticRow(
                         "التعرف المحلي على الكلام (STT)",
-                        if (isOnDeviceSttSupported) "On-Device متاح (ar-EG)" else "توافق نظامي (Prefer Offline)",
-                        if (isOnDeviceSttSupported) CheetahEmerald else CheetahAmber
+                        offlineSttStatus.engineModeLabelAr,
+                        if (offlineSttStatus.isOnDeviceApiAvailable) CheetahEmerald else CheetahAmber
                     )
                     DiagnosticRow(
                         "محرك النطق المصري (TTS)",
-                        ttsStatus.activeLocaleTag,
-                        if (ttsStatus.hasEgyptianVoice) CheetahEmerald else CheetahAmber
+                        if (ttsStatus.hasOfflineVoice) "${ttsStatus.activeLocaleTag} (Offline)" else ttsStatus.activeLocaleTag,
+                        if (ttsStatus.hasEgyptianVoice && ttsStatus.hasOfflineVoice) CheetahEmerald else CheetahAmber
                     )
                     DiagnosticRow(
-                        "بصمات Voice Match المحلية",
+                        "النموذج الصوتي المدمج (يا شيتا)",
+                        "CHKW-v1 Int8 (assets/models/cheetah_ya_sheeta_kws.bin)",
+                        CheetahEmerald
+                    )
+                    DiagnosticRow(
+                        "نماذج MFCC-DTW و Voice Match",
                         "$enrolledTemplatesCount عينة محفوظة داخل filesDir",
                         CheetahCyan
                     )

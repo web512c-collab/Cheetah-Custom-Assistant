@@ -32,11 +32,13 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -60,6 +62,7 @@ import com.example.ui.theme.CheetahObsidian
 import com.example.ui.theme.CheetahSlate
 import com.example.ui.theme.CheetahTextSecondary
 import com.example.ui.viewmodel.AssistantViewModel
+import com.example.voice.BootCompletedReceiver
 
 private const val ROUTE_CONSOLE = "console"
 private const val ROUTE_SETTINGS = "settings"
@@ -82,16 +85,24 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        val resumeWakeFromBoot = intent?.getBooleanExtra(
+            BootCompletedReceiver.EXTRA_RESUME_WAKE_LISTENER,
+            false
+        ) ?: false
+
         setContent {
             CheetahAssistantTheme {
-                CheetahAppRoot()
+                CheetahAppRoot(resumeWakeFromBoot = resumeWakeFromBoot)
             }
         }
     }
 }
 
 @Composable
-fun CheetahAppRoot(viewModel: AssistantViewModel = viewModel()) {
+fun CheetahAppRoot(
+    resumeWakeFromBoot: Boolean = false,
+    viewModel: AssistantViewModel = viewModel()
+) {
     val context = LocalContext.current
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -102,6 +113,9 @@ fun CheetahAppRoot(viewModel: AssistantViewModel = viewModel()) {
     val enrolledSamples by viewModel.enrolledSamples.collectAsStateWithLifecycle()
     val permissions by viewModel.permissionHealth.collectAsStateWithLifecycle()
     val ttsStatus by viewModel.ttsStatus.collectAsStateWithLifecycle()
+    val offlineSttStatus by viewModel.offlineSttStatus.collectAsStateWithLifecycle()
+    val diagnostics by viewModel.diagnostics.collectAsStateWithLifecycle()
+    val memoryState by viewModel.memoryState.collectAsStateWithLifecycle()
     val serviceRunning by viewModel.serviceRunning.collectAsStateWithLifecycle()
     val liveMicLevel by viewModel.liveMicLevel.collectAsStateWithLifecycle()
     val pipelineState by viewModel.pipelineState.collectAsStateWithLifecycle()
@@ -110,6 +124,12 @@ fun CheetahAppRoot(viewModel: AssistantViewModel = viewModel()) {
     val isRecordingEnrollment by viewModel.isRecordingEnrollment.collectAsStateWithLifecycle()
     val enrollmentAmplitude by viewModel.enrollmentAmplitude.collectAsStateWithLifecycle()
     val enrollmentFeedbackAr by viewModel.enrollmentFeedbackAr.collectAsStateWithLifecycle()
+
+    LaunchedEffect(resumeWakeFromBoot) {
+        if (resumeWakeFromBoot) {
+            viewModel.toggleContinuousListening(true)
+        }
+    }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -149,7 +169,7 @@ fun CheetahAppRoot(viewModel: AssistantViewModel = viewModel()) {
             text = {
                 Text(
                     text = "شيتا بيستخدم المايكروفون على جهازك فقط عشان يسمع اسم التنبيه، يتحقق من بصمة صوتك (Voice Match)، ويفهم أوامرك بالعامية المصرية أوفلاين. التطبيق مفيهوش أصلاً صلاحية إنترنت ومش بيبعت أي صوت بره موبايلك.",
-                    color = androidx.compose.ui.graphics.Color.White
+                    color = Color.White
                 )
             },
             confirmButton = {
@@ -259,9 +279,7 @@ fun CheetahAppRoot(viewModel: AssistantViewModel = viewModel()) {
                                 onSubmitTextCommand = { viewModel.submitTextCommand(it) },
                                 onToggleContinuousListening = { viewModel.toggleContinuousListening(it) },
                                 onToggleMute = { viewModel.toggleMute() },
-                                onRequestMicPermission = {
-                                    showMicRationale = true
-                                },
+                                onRequestMicPermission = { showMicRationale = true },
                                 onOpenSettingsTab = {
                                     navController.navigate(ROUTE_SETTINGS) {
                                         launchSingleTop = true
@@ -277,6 +295,11 @@ fun CheetahAppRoot(viewModel: AssistantViewModel = viewModel()) {
                                 enrolledSamples = enrolledSamples,
                                 permissions = permissions,
                                 ttsStatus = ttsStatus,
+                                offlineSttStatus = offlineSttStatus,
+                                diagnostics = diagnostics,
+                                memoryState = memoryState,
+                                serviceRunning = serviceRunning,
+                                liveMicLevel = liveMicLevel,
                                 isRecordingEnrollment = isRecordingEnrollment,
                                 enrollmentAmplitude = enrollmentAmplitude,
                                 enrollmentFeedbackAr = enrollmentFeedbackAr,
@@ -296,14 +319,17 @@ fun CheetahAppRoot(viewModel: AssistantViewModel = viewModel()) {
                                 onRecordVoiceSample = { viewModel.recordVoiceWakeSample(it) },
                                 onClearVoiceSamples = { viewModel.clearVoiceSamples() },
                                 onUpdateWakeSensitivity = { viewModel.updateWakeSensitivity(it) },
-                                onUpdateVoiceMatch = { en, thr -> viewModel.updateVoiceMatch(en, thr) },
+                                onUpdateVoiceMatch = { en, thr, fb ->
+                                    viewModel.updateVoiceMatch(en, thr, fb)
+                                },
+                                onUpdateWakeAckPhrase = { viewModel.updateWakeAckPhrase(it) },
                                 onUpdatePersonaTone = { viewModel.updatePersonaTone(it) },
                                 onUpdateTtsTuning = { r, p -> viewModel.updateTtsTuning(r, p) },
                                 onTestEgyptianTts = { viewModel.testEgyptianTts() },
                                 onToggleRule = { id, en -> viewModel.toggleRule(id, en) },
-                                onRequestMicPermission = {
-                                    showMicRationale = true
-                                },
+                                onToggleContinuousListening = { viewModel.toggleContinuousListening(it) },
+                                onToggleMute = { viewModel.toggleMute() },
+                                onRequestMicPermission = { showMicRationale = true },
                                 onRequestNotificationPermission = {
                                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                         notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -330,13 +356,20 @@ fun CheetahAppRoot(viewModel: AssistantViewModel = viewModel()) {
                                         )
                                     }
                                 },
-                                onRefreshPermissions = { viewModel.refreshPermissions() }
+                                onRefreshPermissions = { viewModel.refreshPermissions() },
+                                onRunMicDiagnosticTest = { viewModel.runControlledMicDiagnosticTest() },
+                                onMarkFalseActivation = { viewModel.markFalseActivation() },
+                                onResetDiagnosticCounters = { viewModel.resetDiagnosticCounters() },
+                                onAddShortcut = { trig, cmd -> viewModel.addPersonalShortcut(trig, cmd) },
+                                onDeleteShortcut = { id -> viewModel.deletePersonalShortcut(id) },
+                                onDeleteMemoryEntry = { id -> viewModel.deleteMemoryEntry(id) },
+                                onClearAllMemory = { viewModel.clearAllMemory() }
                             )
                         }
 
                         composable(ROUTE_ARCHITECTURE) {
                             ArchitectureScreen(
-                                isOnDeviceSttSupported = viewModel.isOnDeviceSttSupported,
+                                offlineSttStatus = offlineSttStatus,
                                 ttsStatus = ttsStatus,
                                 enrolledTemplatesCount = enrolledSamples.size
                             )

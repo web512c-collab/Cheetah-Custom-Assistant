@@ -38,6 +38,18 @@ object CommandGuardrailValidator {
                 }
             }
 
+            is EgyptianIntent.CloseCurrentApp -> {
+                if (!settings.allowAccessibilityAutomation || !permissions.isAccessibilityEnabled) {
+                    GuardrailVerdict.Denied(
+                        ruleId = EndLineRule.RULE_ACCESSIBILITY_SCREEN_CONTROL,
+                        reasonAr = "أندرويد بيمنع قفل التطبيقات التانية قسرياً. لو حابب أرجعلك للشاشة الرئيسية، فعّل خدمة إمكانية الوصول (Accessibility) من الإعدادات.",
+                        requiresSettingsRedirect = true
+                    )
+                } else {
+                    GuardrailVerdict.Allowed(intent)
+                }
+            }
+
             is EgyptianIntent.AccessibilityUiAction -> {
                 if (!settings.allowAccessibilityAutomation) {
                     GuardrailVerdict.Denied(
@@ -64,6 +76,16 @@ object CommandGuardrailValidator {
                 }
             }
 
+            is EgyptianIntent.CompoundCommands -> {
+                for (step in intent.steps) {
+                    val stepVerdict = validate(step, settings, permissions, voiceMatchPassed)
+                    if (stepVerdict is GuardrailVerdict.Denied) {
+                        return stepVerdict
+                    }
+                }
+                GuardrailVerdict.Allowed(intent)
+            }
+
             is EgyptianIntent.OpenApp,
             is EgyptianIntent.YouTubeSearchPlay,
             is EgyptianIntent.WebSearch,
@@ -71,6 +93,7 @@ object CommandGuardrailValidator {
             is EgyptianIntent.DeviceSettingPanel,
             is EgyptianIntent.SetAlarmOrTimer,
             is EgyptianIntent.SystemStatusBriefing,
+            is EgyptianIntent.RecallConversationContext,
             is EgyptianIntent.SmallTalkOrPersona,
             is EgyptianIntent.Unknown -> GuardrailVerdict.Allowed(intent)
         }

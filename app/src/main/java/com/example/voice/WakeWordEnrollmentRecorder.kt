@@ -19,7 +19,7 @@ sealed class EnrollmentCaptureResult {
 
 /**
  * Records a short spoken wake-word utterance directly from AudioRecord (16kHz Mono PCM),
- * extracts an acoustic + speaker vector, and returns a VoiceTemplateSample.
+ * extracts both the 13-MFCC DTW sequence and the 14-D Voice Match speaker vector.
  */
 class WakeWordEnrollmentRecorder(private val context: Context) {
 
@@ -36,7 +36,7 @@ class WakeWordEnrollmentRecorder(private val context: Context) {
         }
 
         val sampleRate = AudioFeatureExtractor.SAMPLE_RATE
-        val durationMs = 1700L
+        val durationMs = 1900L
         val totalSamples = (sampleRate * durationMs / 1000L).toInt()
         val minBuf = AudioRecord.getMinBufferSize(
             sampleRate,
@@ -44,26 +44,10 @@ class WakeWordEnrollmentRecorder(private val context: Context) {
             AudioFormat.ENCODING_PCM_16BIT
         ).coerceAtLeast(2048)
 
-        val audioRecord = runCatching {
-            AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                sampleRate,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                minBuf * 2
+        val audioRecord = createBestAudioRecord(sampleRate, minBuf)
+            ?: return@withContext EnrollmentCaptureResult.Error(
+                "المايكروفون غير متاح أو مستخدم حالياً في تطبيق تاني."
             )
-        }.getOrElse {
-            return@withContext EnrollmentCaptureResult.Error(
-                "تعذر فتح المايكروفون حالياً. اتأكد إنه مش مستخدم في تطبيق تاني."
-            )
-        }
-
-        if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
-            audioRecord.release()
-            return@withContext EnrollmentCaptureResult.Error(
-                "المايكروفون غير جاهز للتسجيل على الجهاز ده."
-            )
-        }
 
         val captured = ShortArray(totalSamples)
         var readTotal = 0
@@ -92,20 +76,48 @@ class WakeWordEnrollmentRecorder(private val context: Context) {
         }
 
         val trimmed = captured.copyOf(readTotal)
-        val vector = AudioFeatureExtractor.extractSpeakerVector(trimmed)
-            ?: return@withContext EnrollmentCaptureResult.Error(
+        val mfccSequence = AudioFeatureExtractor.extractMfccSequence(trimmed, noiseFloorRms = 0.008f)
+        val speakerVector = AudioFeatureExtractor.extractSpeakerVector(trimmed)
+
+        if (mfccSequence == null || speakerVector == null) {
+            return@withContext EnrollmentCaptureResult.Error(
                 "الصوت كان واطي أوي أو قصير. قرّب من المايك وقول «$wakePhrase» بوضوح."
             )
+        }
 
         EnrollmentCaptureResult.Success(
             VoiceTemplateSample(
                 id = UUID.randomUUID().toString(),
                 label = wakePhrase,
-                featureVector = vector,
+                featureVector = speakerVector,
+                mfccSequence = mfccSequence,
                 durationMs = durationMs,
                 peakRms = peakRms,
                 timestampMs = System.currentTimeMillis()
             )
         )
+    }
+
+    private fun createBestAudioRecord(sampleRate: Int, minBuf: Int): AudioRecord? {
+        val sources = intArrayOf(
+            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            MediaRecorder.AudioSource.MIC
+        )
+        for (source in sources) {
+            val rec = runCatching {
+                AudioRecord(
+                    source,
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    minBuf * 2
+                )
+            }.getOrNull()
+            if (rec != null && rec.state == AudioRecord.STATE_INITIALIZED) {
+                return rec
+            }
+            rec?.release()
+        }
+        return null
     }
 }

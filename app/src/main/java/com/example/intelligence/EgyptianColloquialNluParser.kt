@@ -1,6 +1,8 @@
 package com.example.intelligence
 
+import com.example.core.model.ActiveAppContext
 import com.example.core.model.CommMode
+import com.example.core.model.ConversationContextState
 import com.example.core.model.EgyptianIntent
 import com.example.core.model.EndLineRule
 import com.example.core.model.MediaAction
@@ -10,23 +12,27 @@ import com.example.voice.EgyptianPhoneticNormalizer
 
 /**
  * 100% self-contained on-device Egyptian Colloquial Arabic NLU & slot extractor.
- * Understands everyday Egyptian phrasing, number words, and natural Arabic+English code-switching
+ * Understands everyday Egyptian phrasing, number words, context follow-ups,
+ * personal shortcuts, compound commands, and Arabic+English code-switching
  * without any cloud LLM or external API key.
  */
 object EgyptianColloquialNluParser {
 
     private val FINANCIAL_BLOCK_KEYWORDS = listOf(
-        "حول فلوس", "تحويل بنكي", "انستا باي", "instapay", "فودافون كاش",
-        "ادفع", "باسورد البنك", "كود التحقق", "otp", "الفيزا", "الكارت البنكي"
+        "حول فلوس", "تحويل بنكي", "انستا باي", "انستاباي", "instapay", "فودافون كاش",
+        "ادفع", "باسورد البنك", "كود التحقق", "otp", "الفيزا", "الكارت البنكي",
+        "حول رصيد", "اسحب فلوس"
     )
 
     private val DESTRUCTIVE_BLOCK_KEYWORDS = listOf(
         "فرمت الموبايل", "امسح كل حاجة", "اعمل فورمات", "امسح النظام",
-        "factory reset", "احذف كل التطبيقات", "امسح الواتساب"
+        "factory reset", "احذف كل التطبيقات", "امسح الواتساب",
+        "امسح الصور", "امسح كل الملفات"
     )
 
     private val CREDENTIAL_BLOCK_KEYWORDS = listOf(
-        "اقرا الباسورد", "هات كلمات السر", "ابعت كود التفعيل", "سجل المكالمات في الخلفية"
+        "اقرا الباسورد", "هات كلمات السر", "ابعت كود التفعيل",
+        "سجل المكالمات في الخلفية", "كلمة السر", "باسورد"
     )
 
     private val EGYPTIAN_NUMBER_WORDS = mapOf(
@@ -42,7 +48,17 @@ object EgyptianColloquialNluParser {
         "لو سمحت", "ممكن", "عشان خاطري", "من فضلك", "بسرعه", "بسرعة", "يلا"
     )
 
-    fun parse(rawInput: String, configuredWakePhrase: String): Pair<String, EgyptianIntent> {
+    fun parse(
+        rawInput: String,
+        configuredWakePhrase: String
+    ): Pair<String, EgyptianIntent> = parse(rawInput, configuredWakePhrase, ConversationContextState())
+
+    fun parse(
+        rawInput: String,
+        configuredWakePhrase: String,
+        contextState: ConversationContextState,
+        shortcutDepth: Int = 0
+    ): Pair<String, EgyptianIntent> {
         val strippedWake = EgyptianPhoneticNormalizer.stripWakePhrase(rawInput, configuredWakePhrase)
         var norm = EgyptianPhoneticNormalizer.normalizeForNlu(strippedWake)
         for (filler in FILLER_PREFIXES) {
@@ -55,27 +71,62 @@ object EgyptianColloquialNluParser {
             return norm to EgyptianIntent.SmallTalkOrPersona("wake_ack")
         }
 
-        // 1. Hard End-Line Safety Screening (Deterministic Pre-Check)
-        if (FINANCIAL_BLOCK_KEYWORDS.any { norm.contains(EgyptianPhoneticNormalizer.normalizeForNlu(it)) }) {
-            return phonetic to EgyptianIntent.BlockedOrUnsafe(
-                reasonAr = "ممنوع تنفيذ أي تحويلات مالية أو تعاملات بنكية بالصوت لحمايتك.",
-                ruleId = EndLineRule.RULE_BLOCK_FINANCIAL
-            )
-        }
-        if (DESTRUCTIVE_BLOCK_KEYWORDS.any { norm.contains(EgyptianPhoneticNormalizer.normalizeForNlu(it)) }) {
-            return phonetic to EgyptianIntent.BlockedOrUnsafe(
-                reasonAr = "ممنوع تنفيذ أوامر مسح شاملة أو حذف تطبيقات النظام.",
-                ruleId = EndLineRule.RULE_BLOCK_SYSTEM_DESTRUCTIVE
-            )
-        }
-        if (CREDENTIAL_BLOCK_KEYWORDS.any { norm.contains(EgyptianPhoneticNormalizer.normalizeForNlu(it)) }) {
-            return phonetic to EgyptianIntent.BlockedOrUnsafe(
-                reasonAr = "كلمات السر وأكواد التحقق خط أحمر غير مسموح بالوصول ليه.",
-                ruleId = EndLineRule.RULE_BLOCK_CREDENTIAL_HARVEST
-            )
+        // 0. Hard End-Line Safety Screening FIRST (even before shortcuts or compound splitting)
+        checkHardEndLines(norm, phonetic)?.let { return it }
+
+        // 0b. Personal shortcuts (prevent infinite recursion with shortcutDepth)
+        if (shortcutDepth == 0 && contextState.shortcuts.isNotEmpty()) {
+            val matchedShortcut = contextState.shortcuts.firstOrNull { sc ->
+                EgyptianPhoneticNormalizer.normalizeForNlu(sc.triggerPhrase) == norm
+            }
+            if (matchedShortcut != null) {
+                return parse(
+                    rawInput = matchedShortcut.mappedCommand,
+                    configuredWakePhrase = configuredWakePhrase,
+                    contextState = contextState,
+                    shortcutDepth = 1
+                )
+            }
         }
 
-        // 2. YouTube Search & Playback (e.g., "افتح يوتيوب وشغل أغنية...", "شغل ... على يوتيوب")
+        // 0c. Compound commands ("... وبعدين ..." or "... ثم ..." or "... وكمان ...")
+        val compoundSeparators = listOf(" وبعدين ", " ثم ", " وكمان ")
+        for (sep in compoundSeparators) {
+            if (norm.contains(sep)) {
+                val parts = norm.split(sep).map { it.trim() }.filter { it.isNotEmpty() }
+                if (parts.size >= 2) {
+                    val subIntents = parts.map { parse(it, configuredWakePhrase, contextState, shortcutDepth + 1).second }
+                    val blocked = subIntents.firstOrNull { it is EgyptianIntent.BlockedOrUnsafe }
+                    if (blocked != null) return phonetic to blocked
+                    if (subIntents.all { it !is EgyptianIntent.Unknown }) {
+                        return phonetic to EgyptianIntent.CompoundCommands(subIntents)
+                    }
+                }
+            }
+        }
+
+        // 1. Conversation memory recall ("فاكر كنا بنتكلم في إيه", "آخر أمر كان إيه")
+        if (containsAny(
+                norm,
+                "فاكر كنا بنتكلم", "كنا بنتكلم في ايه", "اخر حاجه طلبتها",
+                "اخر امر", "كنا بنقول ايه", "ذاكره المساعد", "ذاكرة المساعد"
+            )
+        ) {
+            return phonetic to EgyptianIntent.RecallConversationContext
+        }
+
+        // 2. Close current app ("اقفل التطبيق ده", "اقفل اليوتيوب", "قفل البرنامج")
+        if (startsWithAny(norm, "اقفل التطبيق", "اقفل البرنامج", "قفل التطبيق", "اطلع من التطبيق", "اقفل اليوتيوب", "اقفل الواتساب", "اقفل الشاشه")) {
+            val hint = norm
+                .removePrefix("اقفل ")
+                .removePrefix("قفل ")
+                .removePrefix("اطلع من ")
+                .trim()
+                .takeIf { it.isNotBlank() && it != "التطبيق ده" && it != "البرنامج ده" }
+            return phonetic to EgyptianIntent.CloseCurrentApp(hint)
+        }
+
+        // 3. YouTube Search & Playback
         if (containsAny(norm, "يوتيوب", "youtube", "يوتوب")) {
             val ytQuery = extractYouTubeQuery(norm)
             return if (ytQuery.isNotBlank()) {
@@ -99,7 +150,7 @@ object EgyptianColloquialNluParser {
             }
         }
 
-        // 3. Web / Google Search ("دورلي على ...", "ابحث عن ...", "جوجل ...")
+        // 4. Web / Google Search OR Contextual YouTube Search follow-up
         if (containsAny(norm, "دورلي علي", "دور علي", "ابحث عن", "ابحثلي عن", "شوفلي علي النت", "اسال جوجل", "في جوجل", "علي جوجل")) {
             val query = norm
                 .replace("دورلي علي", "")
@@ -113,21 +164,31 @@ object EgyptianColloquialNluParser {
                 .replace("علي جوجل", "")
                 .trim()
             if (query.isNotBlank()) {
-                return phonetic to EgyptianIntent.WebSearch(query)
+                val explicitGoogle = containsAny(norm, "جوجل", "النت")
+                return if (!explicitGoogle && contextState.activeAppContext == ActiveAppContext.YOUTUBE) {
+                    phonetic to EgyptianIntent.YouTubeSearchPlay(query)
+                } else {
+                    phonetic to EgyptianIntent.WebSearch(query)
+                }
             }
         }
 
-        // 4. Media & Volume Controls
+        // Context follow-up: "افتحه تاني" / "دور تاني"
+        if (containsAny(norm, "افتحه تاني", "كرر اخر امر") && !contextState.lastOpenedApp.isNullOrBlank()) {
+            return phonetic to EgyptianIntent.OpenApp(contextState.lastOpenedApp)
+        }
+
+        // 5. Media & Volume Controls
         when {
             containsAny(norm, "وطي الصوت", "هدي الصوت", "قلل الصوت", "صوت واطي", "volume down") ->
                 return phonetic to EgyptianIntent.MediaControl(MediaAction.VOLUME_DOWN)
-            containsAny(norm, "علي الصوت", "ارفع الصوت", "زود الصوت", "volume up") ->
+            containsAny(norm, "علي الصوت", "اعلي الصوت", "ارفع الصوت", "زود الصوت", "volume up") ->
                 return phonetic to EgyptianIntent.MediaControl(MediaAction.VOLUME_UP)
             containsAny(norm, "اكتم الصوت", "اعمل ميوت", "ميوت", "اصمت", "mute") ->
                 return phonetic to EgyptianIntent.MediaControl(MediaAction.MUTE)
             containsAny(norm, "رجع الصوت", "فك الكتم", "افتح الصوت", "unmute") ->
                 return phonetic to EgyptianIntent.MediaControl(MediaAction.UNMUTE)
-            containsAny(norm, "وقف الاغنيه", "وقف الصوت", "pause", "وقف الفيديو", "كمل تشغيل") ->
+            containsAny(norm, "وقف الاغنيه", "وقف الصوت", "وقف الموسيقي", "pause", "وقف الفيديو", "كمل تشغيل") ->
                 return phonetic to EgyptianIntent.MediaControl(MediaAction.PLAY_PAUSE)
             containsAny(norm, "اللي بعده", "التراك اللي بعده", "next") ->
                 return phonetic to EgyptianIntent.MediaControl(MediaAction.NEXT_TRACK)
@@ -135,7 +196,7 @@ object EgyptianColloquialNluParser {
                 return phonetic to EgyptianIntent.MediaControl(MediaAction.PREVIOUS_TRACK)
         }
 
-        // 5. Device Settings Panels
+        // 6. Device Settings Panels
         when {
             containsAny(norm, "واي فاي", "الواي فاي", "wifi", "wi fi", "النت") &&
                 containsAny(norm, "افتح", "شغل", "اعدادات", "اقفل", "فصل") ->
@@ -147,17 +208,23 @@ object EgyptianColloquialNluParser {
                 return phonetic to EgyptianIntent.DeviceSettingPanel(SettingPanelTarget.LOCATION)
         }
 
-        // 6. Alarms & Timers ("ظبط منبه الساعة 7 الصبح", "اعمل تايمر 10 دقايق")
+        // 7. Alarms & Timers
         if (containsAny(norm, "منبه", "صحيني", "تايمر", "مؤقت", "عد تنازلي")) {
             return phonetic to parseAlarmOrTimer(norm)
         }
 
-        // 7. System Status Briefing ("الساعة كام", "البطارية كام", "الحالة إيه")
-        if (containsAny(norm, "الساعه كام", "الساعة كام", "الوقت كام", "البطاريه كام", "البطارية كام", "الشحن كام", "تقرير النظام", "الحاله ايه", "الحالة ايه")) {
+        // 8. System Status Briefing
+        if (containsAny(
+                norm,
+                "الساعه كام", "كام الساعه", "الوقت كام",
+                "البطاريه كام", "الشحن كام", "شحني كام",
+                "تقرير النظام", "الحاله ايه"
+            )
+        ) {
             return phonetic to EgyptianIntent.SystemStatusBriefing
         }
 
-        // 8. Calls & SMS Intents ("كلم ماما", "اتصل بـ ...", "ابعت رسالة لـ ...")
+        // 9. Calls & SMS Intents
         if (startsWithAny(norm, "كلم ", "اتصل ب", "رن علي", "اعمل مكالمه ل", "call ")) {
             val target = norm
                 .removePrefix("كلم ")
@@ -181,7 +248,7 @@ object EgyptianColloquialNluParser {
             return phonetic to EgyptianIntent.CallOrMessageIntent(CommMode.SMS, contact, body)
         }
 
-        // 9. Accessibility Screen UI Actions
+        // 10. Accessibility Screen UI Actions
         when {
             containsAny(norm, "اسكرول لتحت", "انزل لتحت", "نزل الشاشه", "scroll down") ->
                 return phonetic to EgyptianIntent.AccessibilityUiAction(UiActionType.SCROLL_DOWN)
@@ -191,17 +258,18 @@ object EgyptianColloquialNluParser {
                 return phonetic to EgyptianIntent.AccessibilityUiAction(UiActionType.GO_BACK)
             containsAny(norm, "روح للهوم", "الشاشه الرئيسيه", "اطلع بره", "go home") ->
                 return phonetic to EgyptianIntent.AccessibilityUiAction(UiActionType.GO_HOME)
-            startsWithAny(norm, "دوس علي ", "اضغط علي ", "tap ") -> {
+            startsWithAny(norm, "دوس علي ", "اضغط علي ", "دوس ", "tap ") -> {
                 val target = norm
                     .removePrefix("دوس علي ")
                     .removePrefix("اضغط علي ")
+                    .removePrefix("دوس ")
                     .removePrefix("tap ")
                     .trim()
                 return phonetic to EgyptianIntent.AccessibilityUiAction(UiActionType.TAP_TEXT, target)
             }
         }
 
-        // 10. Open App ("افتح الواتساب", "شغل الكاميرا")
+        // 11. Open App
         if (startsWithAny(norm, "افتح ", "شغل ", "هات ", "open ", "launch ")) {
             val appName = norm
                 .removePrefix("افتح ")
@@ -215,7 +283,7 @@ object EgyptianColloquialNluParser {
             }
         }
 
-        // 11. Egyptian Small Talk & J.A.R.V.I.S. Persona Banter
+        // 12. Egyptian Small Talk & J.A.R.V.I.S. Persona Banter
         when {
             containsAny(norm, "ازيك", "عامل ايه", "اخبارك ايه", "صباح الخير", "مساء الخير", "السلام عليكم", "اهلا") ->
                 return phonetic to EgyptianIntent.SmallTalkOrPersona("greeting")
@@ -226,6 +294,28 @@ object EgyptianColloquialNluParser {
         }
 
         return phonetic to EgyptianIntent.Unknown(rawInput.trim())
+    }
+
+    private fun checkHardEndLines(norm: String, phonetic: String): Pair<String, EgyptianIntent>? {
+        if (FINANCIAL_BLOCK_KEYWORDS.any { norm.contains(EgyptianPhoneticNormalizer.normalizeForNlu(it)) }) {
+            return phonetic to EgyptianIntent.BlockedOrUnsafe(
+                reasonAr = "ممنوع تنفيذ أي تحويلات مالية أو تعاملات بنكية بالصوت لحمايتك.",
+                ruleId = EndLineRule.RULE_BLOCK_FINANCIAL
+            )
+        }
+        if (DESTRUCTIVE_BLOCK_KEYWORDS.any { norm.contains(EgyptianPhoneticNormalizer.normalizeForNlu(it)) }) {
+            return phonetic to EgyptianIntent.BlockedOrUnsafe(
+                reasonAr = "ممنوع تنفيذ أوامر مسح شاملة أو حذف تطبيقات النظام أو الملفات.",
+                ruleId = EndLineRule.RULE_BLOCK_SYSTEM_DESTRUCTIVE
+            )
+        }
+        if (CREDENTIAL_BLOCK_KEYWORDS.any { norm.contains(EgyptianPhoneticNormalizer.normalizeForNlu(it)) }) {
+            return phonetic to EgyptianIntent.BlockedOrUnsafe(
+                reasonAr = "كلمات السر وأكواد التحقق خط أحمر غير مسموح بالوصول ليه.",
+                ruleId = EndLineRule.RULE_BLOCK_CREDENTIAL_HARVEST
+            )
+        }
+        return null
     }
 
     private fun extractYouTubeQuery(norm: String): String {
@@ -247,7 +337,6 @@ object EgyptianColloquialNluParser {
             .replace("افتح", "")
             .replace("شغل", "")
             .trim()
-        // Drop leading "و" if left over
         if (q.startsWith("و ")) q = q.removePrefix("و ").trim()
         return q
     }

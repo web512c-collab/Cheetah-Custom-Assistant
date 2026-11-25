@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.dp
 import com.example.controller.DeviceActionExecutor
 import com.example.controller.PermissionHealthChecker
 import com.example.core.model.GuardrailVerdict
+import com.example.data.ConversationMemoryStore
 import com.example.data.SettingsRepository
 import com.example.guardrails.CommandGuardrailValidator
 import com.example.intelligence.EgyptianColloquialNluParser
@@ -62,19 +63,21 @@ import com.example.ui.theme.CheetahAssistantTheme
 import com.example.ui.theme.CheetahCrimson
 import com.example.ui.theme.CheetahCyan
 import com.example.ui.theme.CheetahSlate
-import com.example.voice.CheetahWakeWordService
 import com.example.voice.EgyptianOfflineSttManager
 import com.example.voice.EgyptianTtsManager
+import com.example.voice.WakeWordDetectionService
 import kotlinx.coroutines.launch
 
 /**
- * Handles ACTION_ASSIST, ACTION_VOICE_COMMAND, and wake-word triggers from CheetahWakeWordService.
+ * Handles ACTION_ASSIST and ACTION_VOICE_COMMAND system assistant entry points.
+ * Shares persistent ConversationMemoryStore and offline STT/TTS engines.
  */
 class CheetahAssistActivity : ComponentActivity() {
 
     private lateinit var sttManager: EgyptianOfflineSttManager
     private lateinit var ttsManager: EgyptianTtsManager
     private lateinit var settingsRepo: SettingsRepository
+    private lateinit var memoryStore: ConversationMemoryStore
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -82,10 +85,11 @@ class CheetahAssistActivity : ComponentActivity() {
         sttManager = EgyptianOfflineSttManager(this)
         ttsManager = EgyptianTtsManager(this)
         settingsRepo = SettingsRepository(this)
+        memoryStore = ConversationMemoryStore(this)
 
-        val fromWakeWord = intent.getBooleanExtra(CheetahWakeWordService.EXTRA_FROM_WAKE_WORD, false)
-        val voiceMatchScore = if (intent.hasExtra(CheetahWakeWordService.EXTRA_VOICE_MATCH_SCORE)) {
-            intent.getFloatExtra(CheetahWakeWordService.EXTRA_VOICE_MATCH_SCORE, 0f)
+        val fromWakeWord = intent.getBooleanExtra(WakeWordDetectionService.EXTRA_FROM_WAKE_WORD, false)
+        val voiceMatchScore = if (intent.hasExtra(WakeWordDetectionService.EXTRA_VOICE_MATCH_SCORE)) {
+            intent.getFloatExtra(WakeWordDetectionService.EXTRA_VOICE_MATCH_SCORE, 0f)
         } else null
 
         setContent {
@@ -97,6 +101,7 @@ class CheetahAssistActivity : ComponentActivity() {
                     sttManager = sttManager,
                     ttsManager = ttsManager,
                     settingsRepo = settingsRepo,
+                    memoryStore = memoryStore,
                     activity = this
                 )
             }
@@ -118,6 +123,7 @@ private fun AssistOverlaySheet(
     sttManager: EgyptianOfflineSttManager,
     ttsManager: EgyptianTtsManager,
     settingsRepo: SettingsRepository,
+    memoryStore: ConversationMemoryStore,
     activity: ComponentActivity
 ) {
     val scope = rememberCoroutineScope()
@@ -135,10 +141,16 @@ private fun AssistOverlaySheet(
         scope.launch {
             val settings = settingsRepo.currentSettings()
             val perms = PermissionHealthChecker.inspect(activity)
-            val (_, parsedIntent) = EgyptianColloquialNluParser.parse(raw, settings.wakePhrase)
+            val memState = memoryStore.current()
+            val (_, parsedIntent) = EgyptianColloquialNluParser.parse(
+                rawInput = raw,
+                configuredWakePhrase = settings.wakePhrase,
+                contextState = memState
+            )
             val voicePassed = voiceMatchScore == null ||
                 !settings.voiceMatchEnabled ||
-                voiceMatchScore >= settings.voiceMatchThreshold
+                voiceMatchScore >= settings.voiceMatchThreshold ||
+                settings.allowOwnerFallbackOnLowVoiceMatch
 
             when (val verdict = CommandGuardrailValidator.validate(
                 intent = parsedIntent,
@@ -153,17 +165,27 @@ private fun AssistOverlaySheet(
                         settings.personaTone
                     )
                     statusText = reply
+                    memoryStore.recordTurn(raw, reply, parsedIntent.categoryName)
                     ttsManager.speak(reply, settings.ttsSpeechRate, settings.ttsPitch)
                 }
 
                 is GuardrailVerdict.Allowed -> {
                     isBlocked = false
                     val result = DeviceActionExecutor.execute(
-                        activity,
-                        verdict.intent,
-                        settings.personaTone
+                        context = activity,
+                        intent = verdict.intent,
+                        tone = settings.personaTone,
+                        memoryState = memState
                     )
                     statusText = result.replyAr
+                    memoryStore.recordTurn(
+                        userText = raw,
+                        assistantReply = result.replyAr,
+                        intentCategory = verdict.intent.categoryName,
+                        newAppContext = result.newAppContext,
+                        newSearchQuery = result.newSearchQuery,
+                        newOpenedApp = result.newOpenedApp
+                    )
                     ttsManager.speak(result.replyAr, settings.ttsSpeechRate, settings.ttsPitch)
                 }
             }

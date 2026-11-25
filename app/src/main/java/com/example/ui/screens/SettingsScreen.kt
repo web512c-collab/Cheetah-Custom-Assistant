@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.os.Build
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Hearing
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
@@ -71,10 +73,12 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.core.model.AssistantSettings
+import com.example.core.model.ConversationContextState
 import com.example.core.model.EndLineRule
 import com.example.core.model.PermissionHealthState
 import com.example.core.model.PersonaTone
 import com.example.core.model.VoiceTemplateSample
+import com.example.core.model.WakeDiagnosticSnapshot
 import com.example.data.VoiceTemplateStore
 import com.example.ui.theme.CheetahAmber
 import com.example.ui.theme.CheetahBorder
@@ -87,7 +91,9 @@ import com.example.ui.theme.CheetahEmerald
 import com.example.ui.theme.CheetahObsidian
 import com.example.ui.theme.CheetahTextPrimary
 import com.example.ui.theme.CheetahTextSecondary
+import com.example.voice.OfflineSttStatus
 import com.example.voice.TtsStatus
+import java.util.Locale
 
 private val WAKE_PRESETS = listOf("يا شيتا", "هاي شيتا", "يا كابتن", "ألو نمر")
 
@@ -98,6 +104,11 @@ fun SettingsScreen(
     enrolledSamples: List<VoiceTemplateSample>,
     permissions: PermissionHealthState,
     ttsStatus: TtsStatus,
+    offlineSttStatus: OfflineSttStatus,
+    diagnostics: WakeDiagnosticSnapshot,
+    memoryState: ConversationContextState,
+    serviceRunning: Boolean,
+    liveMicLevel: Float,
     isRecordingEnrollment: Boolean,
     enrollmentAmplitude: Float,
     enrollmentFeedbackAr: String?,
@@ -107,20 +118,31 @@ fun SettingsScreen(
     onRecordVoiceSample: (String) -> Unit,
     onClearVoiceSamples: () -> Unit,
     onUpdateWakeSensitivity: (Float) -> Unit,
-    onUpdateVoiceMatch: (Boolean, Float?) -> Unit,
+    onUpdateVoiceMatch: (Boolean, Float?, Boolean?) -> Unit,
+    onUpdateWakeAckPhrase: (String) -> Unit,
     onUpdatePersonaTone: (PersonaTone) -> Unit,
     onUpdateTtsTuning: (Float, Float) -> Unit,
     onTestEgyptianTts: () -> Unit,
     onToggleRule: (String, Boolean) -> Unit,
+    onToggleContinuousListening: (Boolean) -> Unit,
+    onToggleMute: () -> Unit,
     onRequestMicPermission: () -> Unit,
     onRequestNotificationPermission: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
     onRequestBatteryExemption: () -> Unit,
-    onRefreshPermissions: () -> Unit
+    onRefreshPermissions: () -> Unit,
+    onRunMicDiagnosticTest: () -> Unit,
+    onMarkFalseActivation: () -> Unit,
+    onResetDiagnosticCounters: () -> Unit,
+    onAddShortcut: (String, String) -> Unit,
+    onDeleteShortcut: (String) -> Unit,
+    onDeleteMemoryEntry: (Long) -> Unit,
+    onClearAllMemory: () -> Unit
 ) {
-    var wakeTabIndex by remember { mutableIntStateOf(0) } // 0 = Voice Recording, 1 = Text Typing
+    var wakeTabIndex by remember { mutableIntStateOf(0) }
     var draftWakeName by remember(settings.wakePhrase) { mutableStateOf(settings.wakePhrase) }
+    var draftAckPhrase by remember(settings.wakeAckPhrase) { mutableStateOf(settings.wakeAckPhrase) }
 
     Box(
         modifier = Modifier
@@ -147,7 +169,7 @@ fun SettingsScreen(
                         color = CheetahTextPrimary
                     )
                     Text(
-                        text = "تحكم كامل في المساعد الافتراضي، اسم التنبيه، البصمة الصوتية، والخطوط الحمراء",
+                        text = "تحكم كامل في المساعد الافتراضي، اسم التنبيه، البصمة الصوتية، التشخيص، والذاكرة المحلية",
                         style = MaterialTheme.typography.bodySmall,
                         color = CheetahTextSecondary
                     )
@@ -233,7 +255,7 @@ fun SettingsScreen(
                 }
             }
 
-            // 2. CUSTOM WAKE NAME (VOICE OR TEXT) & VOICE MATCH CARD
+            // 2. CUSTOM WAKE NAME, VOICE MATCH & BACKGROUND SERVICE
             item {
                 SettingsSectionCard(
                     title = "2. اسم التنبيه المخصص و Voice Match",
@@ -248,6 +270,55 @@ fun SettingsScreen(
                     )
 
                     Spacer(modifier = Modifier.height(10.dp))
+
+                    // Background Listening + Kill-Switch controls directly in Settings too
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Default.Hearing, contentDescription = null, tint = if (serviceRunning) CheetahEmerald else CheetahTextSecondary)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text("الاستماع المستمر في الخلفية", style = MaterialTheme.typography.bodyMedium, color = CheetahTextPrimary, fontWeight = FontWeight.Bold)
+                                Text(
+                                    text = if (serviceRunning) {
+                                        if (settings.isListeningMuted) "شغال — مكتوم مؤقتاً" else "شغال أوفلاين (شاشة مقفولة أو مفتوحة)"
+                                    } else "متوقف",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = CheetahTextSecondary
+                                )
+                            }
+                        }
+                        Switch(
+                            checked = serviceRunning,
+                            onCheckedChange = { want ->
+                                if (want && !permissions.hasMicPermission) onRequestMicPermission()
+                                else onToggleContinuousListening(want)
+                            },
+                            colors = SwitchDefaults.colors(checkedThumbColor = CheetahObsidian, checkedTrackColor = CheetahCyan),
+                            modifier = Modifier.testTag("settings_continuous_listening_switch")
+                        )
+                    }
+
+                    if (serviceRunning) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        OutlinedButton(
+                            onClick = onToggleMute,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("settings_mute_kill_switch")
+                        ) {
+                            Text(
+                                text = if (settings.isListeningMuted) "إلغاء الكتم واستئناف السمع" else "كتم المايك فوراً (Kill-Switch)",
+                                color = if (settings.isListeningMuted) CheetahEmerald else CheetahCrimson
+                            )
+                        }
+                    }
+
+                    HorizontalDivider(color = CheetahBorder, modifier = Modifier.padding(vertical = 12.dp))
 
                     TabRow(
                         selectedTabIndex = wakeTabIndex,
@@ -308,9 +379,8 @@ fun SettingsScreen(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     if (wakeTabIndex == 0) {
-                        // VOICE ENROLLMENT MODE
                         Text(
-                            text = "سجل اسم التنبيه بصوتك لحد ${VoiceTemplateStore.MAX_SAMPLES} مرات عشان شيتا يتعرف على نبرة صوتك محلياً ويقلل الغلط.",
+                            text = "سجل اسم التنبيه بصوتك لحد ${VoiceTemplateStore.MAX_SAMPLES} مرات لبناء نموذج MFCC-DTW محلي يتعرف على الاسم ونبرة صوتك.",
                             style = MaterialTheme.typography.bodySmall,
                             color = CheetahTextSecondary
                         )
@@ -338,7 +408,7 @@ fun SettingsScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "البصمات المسجلة: ${enrolledSamples.size} / ${VoiceTemplateStore.MAX_SAMPLES}",
+                                text = "النماذج المسجلة: ${enrolledSamples.size} / ${VoiceTemplateStore.MAX_SAMPLES}",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = CheetahTextPrimary
                             )
@@ -397,9 +467,8 @@ fun SettingsScreen(
                             )
                         }
                     } else {
-                        // TEXT TYPING MODE
                         Text(
-                            text = "اكتب أي اسم أو جملة بالعربي أو بالإنجليزي، وهيشتغل مع المطابقة الصوتية للعامية المصرية.",
+                            text = "اكتب اسم التنبيه بالعربي أو بالإنجليزي. في الوضع النصي الصرف بدون تسجيل صوتي، يتحقق النظام من الكلمة عبر STT المحلي عند سماع كلام واضح.",
                             style = MaterialTheme.typography.bodySmall,
                             color = CheetahTextSecondary
                         )
@@ -462,14 +531,14 @@ fun SettingsScreen(
                                 color = CheetahTextPrimary
                             )
                             Text(
-                                text = "يتعرف على صوتك إنت فقط ويمنع فتح المساعد من أصوات تانية",
+                                text = "يتعرف على نبرة صوتك ويمنع تفعيل المساعد من أصوات تانية",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = CheetahTextSecondary
                             )
                         }
                         Switch(
                             checked = settings.voiceMatchEnabled,
-                            onCheckedChange = { onUpdateVoiceMatch(it, null) },
+                            onCheckedChange = { onUpdateVoiceMatch(it, null, null) },
                             colors = SwitchDefaults.colors(
                                 checkedThumbColor = CheetahObsidian,
                                 checkedTrackColor = CheetahCyan
@@ -487,25 +556,90 @@ fun SettingsScreen(
                         )
                         Slider(
                             value = settings.voiceMatchThreshold,
-                            onValueChange = { onUpdateVoiceMatch(true, it) },
-                            valueRange = 0.55f..0.90f,
+                            onValueChange = { onUpdateVoiceMatch(true, it, null) },
+                            valueRange = 0.50f..0.90f,
                             colors = SliderDefaults.colors(
                                 thumbColor = CheetahAmber,
                                 activeTrackColor = CheetahAmber
                             ),
                             modifier = Modifier.testTag("settings_voice_match_threshold_slider")
                         )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "بديل المالك الآمن عند انخفاض الثقة",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = CheetahTextPrimary
+                                )
+                                Text(
+                                    text = "يسمح بالاستجابة في الضوضاء أو البرد لو نطق كلمة التنبيه قوي جداً.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = CheetahTextSecondary
+                                )
+                            }
+                            Switch(
+                                checked = settings.allowOwnerFallbackOnLowVoiceMatch,
+                                onCheckedChange = { onUpdateVoiceMatch(true, null, it) },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = CheetahObsidian,
+                                    checkedTrackColor = CheetahEmerald
+                                ),
+                                modifier = Modifier.testTag("settings_voice_match_fallback_switch")
+                            )
+                        }
                     }
                 }
             }
 
-            // 3. PERSONA, EGYPTIAN TTS & HARD END-LINE BOUNDARIES
+            // 3. PERSONA, WAKE ACK, EGYPTIAN TTS & HARD END-LINE BOUNDARIES
             item {
                 SettingsSectionCard(
                     title = "3. شخصية J.A.R.V.I.S. والخطوط الحمراء",
                     icon = Icons.Default.Shield,
                     accent = CheetahAmber
                 ) {
+                    Text(
+                        text = "عبارة الرد الفوري عند سماع كلمة التنبيه",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = CheetahTextPrimary
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = draftAckPhrase,
+                            onValueChange = { draftAckPhrase = it },
+                            singleLine = true,
+                            placeholder = { Text("أيوه، معاك") },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = CheetahCyan,
+                                unfocusedBorderColor = CheetahBorder
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("settings_wake_ack_input")
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = { onUpdateWakeAckPhrase(draftAckPhrase) },
+                            colors = ButtonDefaults.buttonColors(containerColor = CheetahCyan),
+                            modifier = Modifier
+                                .height(52.dp)
+                                .testTag("settings_save_wake_ack_btn")
+                        ) {
+                            Text("حفظ", color = CheetahObsidian, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    HorizontalDivider(color = CheetahBorder, modifier = Modifier.padding(vertical = 14.dp))
+
                     Text(
                         text = "أسلوب الكلام بالعامية المصرية",
                         style = MaterialTheme.typography.titleMedium,
@@ -560,7 +694,6 @@ fun SettingsScreen(
                         modifier = Modifier.padding(vertical = 14.dp)
                     )
 
-                    // Egyptian TTS status + tuning
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
@@ -580,7 +713,12 @@ fun SettingsScreen(
 
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "سرعة النطق: ${String.format("%.2fx", settings.ttsSpeechRate)}  •  حدة الصوت: ${String.format("%.2f", settings.ttsPitch)}",
+                        text = String.format(
+                            Locale.US,
+                            "سرعة النطق: %.2fx  •  حدة الصوت: %.2f",
+                            settings.ttsSpeechRate,
+                            settings.ttsPitch
+                        ),
                         style = MaterialTheme.typography.labelMedium,
                         color = CheetahTextPrimary
                     )
@@ -765,16 +903,48 @@ fun SettingsScreen(
                     Surface(
                         color = CheetahDeepNavy,
                         shape = RoundedCornerShape(12.dp),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, CheetahBorder)
+                        border = BorderStroke(1.dp, CheetahBorder)
                     ) {
                         Text(
-                            text = "ملاحظة لأجهزة شاومي / سامسونج / أوبو: لو الخدمة وقفت لوحدها بعد قفل الشاشة، فعّل «التشغيل التلقائي (Autostart)» واقفل تطبيق شيتا في شاشة التطبيقات الحديثة.",
+                            text = "ملاحظة لأجهزة شاومي / سامسونج / أوبو: لو الخدمة وقفت لوحدها بعد قفل الشاشة، فعّل «التشغيل التلقائي (Autostart)» واقفل تطبيق شيتا في شاشة التطبيقات الحديثة. وفي أندرويد 14+ بعد إعادة التشغيل يظهر إشعار بضغطة واحدة لتشغيل المايك.",
                             style = MaterialTheme.typography.bodySmall,
                             color = CheetahTextSecondary,
                             modifier = Modifier.padding(12.dp)
                         )
                     }
                 }
+            }
+
+            // 5. LOCAL ENGINE STATUS (STT / TTS / MFCC-DTW)
+            item {
+                LocalEngineStatusCard(
+                    offlineSttStatus = offlineSttStatus,
+                    ttsStatus = ttsStatus,
+                    diagnostics = diagnostics
+                )
+            }
+
+            // 6. WAKE-WORD DIAGNOSTIC CONSOLE
+            item {
+                WakeDiagnosticConsoleCard(
+                    diagnostics = diagnostics,
+                    liveMicLevel = liveMicLevel,
+                    serviceRunning = serviceRunning,
+                    onRunMicDiagnosticTest = onRunMicDiagnosticTest,
+                    onMarkFalseActivation = onMarkFalseActivation,
+                    onResetCounters = onResetDiagnosticCounters
+                )
+            }
+
+            // 7. LOCAL MEMORY & PERSONAL SHORTCUTS
+            item {
+                LocalMemoryAndShortcutsCard(
+                    memoryState = memoryState,
+                    onAddShortcut = onAddShortcut,
+                    onDeleteShortcut = onDeleteShortcut,
+                    onDeleteMemoryEntry = onDeleteMemoryEntry,
+                    onClearAllMemory = onClearAllMemory
+                )
             }
         }
     }
@@ -790,7 +960,7 @@ private fun SettingsSectionCard(
     Card(
         colors = CardDefaults.cardColors(containerColor = CheetahCard),
         shape = RoundedCornerShape(20.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, CheetahBorder)
+        border = BorderStroke(1.dp, CheetahBorder)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {

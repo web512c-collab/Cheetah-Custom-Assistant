@@ -93,6 +93,7 @@ private val QUICK_EGYPTIAN_COMMANDS = listOf(
     "وطي الصوت شوية" to false,
     "ظبط منبه الساعة 7 الصبح" to false,
     "الساعة كام والبطارية كام؟" to false,
+    "فاكر كنا بنتكلم في إيه؟" to false,
     "حول 500 جنيه انستا باي" to true
 )
 

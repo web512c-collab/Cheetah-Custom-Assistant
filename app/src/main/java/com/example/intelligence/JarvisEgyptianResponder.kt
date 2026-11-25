@@ -4,8 +4,6 @@ import com.example.core.model.CommMode
 import com.example.core.model.EgyptianIntent
 import com.example.core.model.MediaAction
 import com.example.core.model.PersonaTone
-import com.example.core.model.SettingPanelTarget
-import com.example.core.model.UiActionType
 
 /**
  * Generates authentic Egyptian Colloquial Arabic responses in J.A.R.V.I.S.-inspired
@@ -27,6 +25,17 @@ object JarvisEgyptianResponder {
                     PersonaTone.JARVIS_FORMAL_EGYPTIAN -> "تحت أمرك يا فندم، بفتحلك «$app» حالاً."
                     PersonaTone.FRIENDLY_EGYPTIAN -> "من عيوني! يلا نفتح «$app» دلوقتي."
                     PersonaTone.CONCISE_TACTICAL -> "تم فتح «$app»."
+                }
+            }
+
+            is EgyptianIntent.CloseCurrentApp -> {
+                when (tone) {
+                    PersonaTone.JARVIS_FORMAL_EGYPTIAN ->
+                        "أندرويد بيمنع إغلاق التطبيقات التانية قسرياً لحماية النظام، فرجعتلك للشاشة الرئيسية يا فندم."
+                    PersonaTone.FRIENDLY_EGYPTIAN ->
+                        "أندرويد مبيسمحش أقفل تطبيق تاني غصب، فطلعتلك للشاشة الرئيسية!"
+                    PersonaTone.CONCISE_TACTICAL ->
+                        "تم الرجوع للشاشة الرئيسية (قيد نظام أندرويد)."
                 }
             }
 
@@ -132,6 +141,12 @@ object JarvisEgyptianResponder {
                     PersonaTone.CONCISE_TACTICAL -> "تم: $desc."
                 }
             }
+
+            is EgyptianIntent.RecallConversationContext ->
+                "فاكر طبعاً يا فندم، تقدر تراجع آخر حواراتنا من سجل الذاكرة المحلية."
+
+            is EgyptianIntent.CompoundCommands ->
+                "نفذتلك الأوامر المركبة خطوة بخطوة يا فندم."
 
             is EgyptianIntent.SmallTalkOrPersona -> handleSmallTalk(intent.topic, tone)
 

@@ -12,6 +12,7 @@ import com.example.R
 import com.example.controller.DeviceActionExecutor
 import com.example.controller.PermissionHealthChecker
 import com.example.core.model.GuardrailVerdict
+import com.example.data.ConversationMemoryStore
 import com.example.data.SettingsRepository
 import com.example.guardrails.CommandGuardrailValidator
 import com.example.intelligence.EgyptianColloquialNluParser
@@ -32,6 +33,7 @@ class CheetahVoiceInteractionSession(context: Context) : VoiceInteractionSession
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val settingsRepo = SettingsRepository(context)
+    private val memoryStore = ConversationMemoryStore(context)
     private val sttManager = EgyptianOfflineSttManager(context)
     private val ttsManager = EgyptianTtsManager(context)
 
@@ -88,7 +90,12 @@ class CheetahVoiceInteractionSession(context: Context) : VoiceInteractionSession
         scope.launch {
             val settings = settingsRepo.currentSettings()
             val permissions = PermissionHealthChecker.inspect(context)
-            val (_, intent) = EgyptianColloquialNluParser.parse(rawText, settings.wakePhrase)
+            val memState = memoryStore.current()
+            val (_, intent) = EgyptianColloquialNluParser.parse(
+                rawInput = rawText,
+                configuredWakePhrase = settings.wakePhrase,
+                contextState = memState
+            )
 
             when (val verdict = CommandGuardrailValidator.validate(
                 intent = intent,
@@ -102,16 +109,26 @@ class CheetahVoiceInteractionSession(context: Context) : VoiceInteractionSession
                         settings.personaTone
                     )
                     statusView?.text = reply
+                    memoryStore.recordTurn(rawText, reply, intent.categoryName)
                     ttsManager.speak(reply, settings.ttsSpeechRate, settings.ttsPitch)
                 }
 
                 is GuardrailVerdict.Allowed -> {
                     val result = DeviceActionExecutor.execute(
-                        context,
-                        verdict.intent,
-                        settings.personaTone
+                        context = context,
+                        intent = verdict.intent,
+                        tone = settings.personaTone,
+                        memoryState = memState
                     )
                     statusView?.text = result.replyAr
+                    memoryStore.recordTurn(
+                        userText = rawText,
+                        assistantReply = result.replyAr,
+                        intentCategory = verdict.intent.categoryName,
+                        newAppContext = result.newAppContext,
+                        newSearchQuery = result.newSearchQuery,
+                        newOpenedApp = result.newOpenedApp
+                    )
                     ttsManager.speak(result.replyAr, settings.ttsSpeechRate, settings.ttsPitch)
                 }
             }

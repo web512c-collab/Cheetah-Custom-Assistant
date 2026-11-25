@@ -1,30 +1,36 @@
 package com.example.ui.viewmodel
 
 import android.app.Application
+import android.content.Intent
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.controller.DeviceActionExecutor
 import com.example.controller.PermissionHealthChecker
 import com.example.core.model.AssistantPipelineState
 import com.example.core.model.AssistantSettings
+import com.example.core.model.ConversationContextState
 import com.example.core.model.EndLineRule
 import com.example.core.model.GuardrailVerdict
 import com.example.core.model.InteractionTrace
 import com.example.core.model.PermissionHealthState
 import com.example.core.model.PersonaTone
 import com.example.core.model.VoiceTemplateSample
+import com.example.core.model.WakeDiagnosticSnapshot
 import com.example.core.model.WakeWordSetupMode
+import com.example.data.ConversationMemoryStore
 import com.example.data.SettingsRepository
 import com.example.data.VoiceTemplateStore
 import com.example.guardrails.CommandGuardrailValidator
 import com.example.intelligence.EgyptianColloquialNluParser
 import com.example.intelligence.JarvisEgyptianResponder
+import com.example.voice.BundledYaSheetaAcousticModel
 import com.example.voice.CheetahRuntimeBus
-import com.example.voice.CheetahWakeWordService
 import com.example.voice.EgyptianOfflineSttManager
 import com.example.voice.EgyptianTtsManager
 import com.example.voice.EnrollmentCaptureResult
+import com.example.voice.OfflineSttStatus
 import com.example.voice.TtsStatus
+import com.example.voice.WakeWordDetectionService
 import com.example.voice.WakeWordEnrollmentRecorder
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -41,6 +47,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private val appContext = application.applicationContext
     private val settingsRepo = SettingsRepository(appContext)
     private val templateStore = VoiceTemplateStore(appContext)
+    private val memoryStore = ConversationMemoryStore(appContext)
     private val enrollmentRecorder = WakeWordEnrollmentRecorder(appContext)
     private val sttManager = EgyptianOfflineSttManager(appContext)
     private val ttsManager = EgyptianTtsManager(appContext)
@@ -58,12 +65,17 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     )
 
     val enrolledSamples: StateFlow<List<VoiceTemplateSample>> = templateStore.samples
+    val memoryState: StateFlow<ConversationContextState> = memoryStore.state
 
     val ttsStatus: StateFlow<TtsStatus> = ttsManager.status
     val serviceRunning: StateFlow<Boolean> = CheetahRuntimeBus.serviceRunning
     val liveMicLevel: StateFlow<Float> = CheetahRuntimeBus.liveMicLevel
     val pipelineState: StateFlow<AssistantPipelineState> = CheetahRuntimeBus.pipelineState
     val lastVoiceMatchScore: StateFlow<Float?> = CheetahRuntimeBus.lastVoiceMatchScore
+    val diagnostics: StateFlow<WakeDiagnosticSnapshot> = CheetahRuntimeBus.diagnostics
+
+    private val _offlineSttStatus = MutableStateFlow(sttManager.inspectCapability())
+    val offlineSttStatus: StateFlow<OfflineSttStatus> = _offlineSttStatus.asStateFlow()
 
     private val _permissionHealth = MutableStateFlow(PermissionHealthChecker.inspect(appContext))
     val permissionHealth: StateFlow<PermissionHealthState> = _permissionHealth.asStateFlow()
@@ -86,8 +98,28 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     val isOnDeviceSttSupported: Boolean
         get() = sttManager.isOnDeviceSupported()
 
+    init {
+        viewModelScope.launch {
+            val bundledRes = BundledYaSheetaAcousticModel.loadFromAssets(appContext)
+            val bundled = bundledRes.getOrNull()
+            val mfccCount = templateStore.samples.value.count { it.mfccSequence.isNotEmpty() }
+            CheetahRuntimeBus.updateDiagnostics { snap ->
+                snap.copy(
+                    modelStatus = if (bundled != null) {
+                        "CHKW-v1 ('يا شيتا', ${bundled.modelSizeBytes}B) + $mfccCount/${VoiceTemplateStore.MAX_SAMPLES} MFCC"
+                    } else {
+                        "$mfccCount/${VoiceTemplateStore.MAX_SAMPLES} MFCC templates"
+                    },
+                    lastError = bundledRes.exceptionOrNull()?.let { "تعذر تحميل النموذج المدمج: ${it.message}" } ?: snap.lastError
+                )
+            }
+            bundled?.close()
+        }
+    }
+
     fun refreshPermissions() {
         _permissionHealth.value = PermissionHealthChecker.inspect(appContext)
+        _offlineSttStatus.value = sttManager.inspectCapability()
     }
 
     fun startVoiceCommand() {
@@ -130,10 +162,12 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             val currentSettings = settingsRepo.currentSettings()
             val currentPerms = PermissionHealthChecker.inspect(appContext)
             _permissionHealth.value = currentPerms
+            val memState = memoryStore.current()
 
             val (normalizedPhonetic, parsedIntent) = EgyptianColloquialNluParser.parse(
                 rawInput = rawText,
-                configuredWakePhrase = currentSettings.wakePhrase
+                configuredWakePhrase = currentSettings.wakePhrase,
+                contextState = memState
             )
 
             val verdict = CommandGuardrailValidator.validate(
@@ -152,6 +186,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         verdict.reasonAr,
                         currentSettings.personaTone
                     )
+                    memoryStore.recordTurn(rawText, reply, parsedIntent.categoryName)
                     prependTrace(
                         InteractionTrace(
                             rawUtterance = rawText,
@@ -170,9 +205,18 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 is GuardrailVerdict.Allowed -> {
                     CheetahRuntimeBus.updatePipelineState(AssistantPipelineState.EXECUTING_ACTION)
                     val result = DeviceActionExecutor.execute(
-                        appContext,
-                        verdict.intent,
-                        currentSettings.personaTone
+                        context = appContext,
+                        intent = verdict.intent,
+                        tone = currentSettings.personaTone,
+                        memoryState = memState
+                    )
+                    memoryStore.recordTurn(
+                        userText = rawText,
+                        assistantReply = result.replyAr,
+                        intentCategory = verdict.intent.categoryName,
+                        newAppContext = result.newAppContext,
+                        newSearchQuery = result.newSearchQuery,
+                        newOpenedApp = result.newOpenedApp
                     )
                     prependTrace(
                         InteractionTrace(
@@ -215,9 +259,9 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             }
             settingsRepo.setContinuousListening(enable)
             if (enable) {
-                CheetahWakeWordService.start(appContext)
+                WakeWordDetectionService.start(appContext)
             } else {
-                CheetahWakeWordService.stop(appContext)
+                WakeWordDetectionService.stop(appContext)
             }
         }
     }
@@ -227,11 +271,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             val next = !settings.value.isListeningMuted
             settingsRepo.setListeningMuted(next)
             if (serviceRunning.value) {
-                appContext.startService(
-                    android.content.Intent(appContext, CheetahWakeWordService::class.java).apply {
-                        action = CheetahWakeWordService.ACTION_TOGGLE_MUTE
-                    }
-                )
+                WakeWordDetectionService.toggleMute(appContext)
             }
         }
     }
@@ -244,7 +284,11 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 WakeWordSetupMode.TEXT_TYPED
             }
             settingsRepo.updateWakePhrase(phrase, mode)
-            _enrollmentFeedbackAr.value = "تم حفظ اسم التنبيه النصي: «${phrase.trim()}»"
+            _enrollmentFeedbackAr.value = if (mode == WakeWordSetupMode.TEXT_TYPED) {
+                "تم حفظ اسم التنبيه النصي: «${phrase.trim()}» (يتحقق عبر STT عند السمع)."
+            } else {
+                "تم حفظ اسم التنبيه المدمج: «${phrase.trim()}»."
+            }
         }
     }
 
@@ -263,9 +307,12 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         targetWakePhrase,
                         WakeWordSetupMode.VOICE_RECORDED
                     )
+                    if (serviceRunning.value) {
+                        WakeWordDetectionService.reloadTemplates(appContext)
+                    }
                     val count = templateStore.samples.value.size
                     _enrollmentFeedbackAr.value =
-                        "تم حفظ البصمة الصوتية ($count/${VoiceTemplateStore.MAX_SAMPLES}) لاسم «$targetWakePhrase»."
+                        "تم حفظ نموذج MFCC-DTW + البصمة ($count/${VoiceTemplateStore.MAX_SAMPLES}) لاسم «$targetWakePhrase»."
                 }
                 is EnrollmentCaptureResult.Error -> {
                     _enrollmentFeedbackAr.value = result.messageAr
@@ -279,7 +326,10 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             templateStore.clearAll()
             settingsRepo.updateWakeMode(WakeWordSetupMode.TEXT_TYPED)
-            _enrollmentFeedbackAr.value = "تم مسح بصمة الصوت المحلية."
+            if (serviceRunning.value) {
+                WakeWordDetectionService.reloadTemplates(appContext)
+            }
+            _enrollmentFeedbackAr.value = "تم مسح البصمات الصوتية المحلية."
         }
     }
 
@@ -287,8 +337,16 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch { settingsRepo.updateWakeSensitivity(value) }
     }
 
-    fun updateVoiceMatch(enabled: Boolean, threshold: Float? = null) {
-        viewModelScope.launch { settingsRepo.updateVoiceMatch(enabled, threshold) }
+    fun updateVoiceMatch(
+        enabled: Boolean,
+        threshold: Float? = null,
+        allowFallback: Boolean? = null
+    ) {
+        viewModelScope.launch { settingsRepo.updateVoiceMatch(enabled, threshold, allowFallback) }
+    }
+
+    fun updateWakeAckPhrase(phrase: String) {
+        viewModelScope.launch { settingsRepo.updateWakeAckPhrase(phrase) }
     }
 
     fun updatePersonaTone(tone: PersonaTone) {
@@ -314,6 +372,44 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun toggleRule(ruleId: String, enabled: Boolean) {
         viewModelScope.launch { settingsRepo.toggleConfigurableRule(ruleId, enabled) }
+    }
+
+    fun addPersonalShortcut(trigger: String, command: String) {
+        viewModelScope.launch { memoryStore.addShortcut(trigger, command) }
+    }
+
+    fun deletePersonalShortcut(id: String) {
+        viewModelScope.launch { memoryStore.deleteShortcut(id) }
+    }
+
+    fun deleteMemoryEntry(id: Long) {
+        viewModelScope.launch { memoryStore.deleteEntry(id) }
+    }
+
+    fun clearAllMemory() {
+        viewModelScope.launch { memoryStore.clearAllMemory() }
+    }
+
+    fun runControlledMicDiagnosticTest() {
+        refreshPermissions()
+        if (!_permissionHealth.value.hasMicPermission) {
+            CheetahRuntimeBus.updateDiagnostics {
+                it.copy(lastError = "امنح صلاحية المايكروفون لتشغيل الاختبار التشخيصي.")
+            }
+            return
+        }
+        viewModelScope.launch {
+            settingsRepo.setContinuousListening(true)
+            WakeWordDetectionService.runDiagnosticTest(appContext)
+        }
+    }
+
+    fun markFalseActivation() {
+        CheetahRuntimeBus.incrementFalseActivation()
+    }
+
+    fun resetDiagnosticCounters() {
+        CheetahRuntimeBus.resetDiagnosticsCounters()
     }
 
     override fun onCleared() {

@@ -13,8 +13,8 @@ import java.io.File
 import kotlin.math.sqrt
 
 /**
- * Self-contained local store for acoustic wake-word and Voice Match speaker templates.
- * Persists feature vectors inside app-private filesDir without any external cloud sync.
+ * Self-contained local store for acoustic MFCC-DTW wake-word templates and Voice Match
+ * speaker vectors. Persisted in app-private filesDir and excluded from cloud backups.
  */
 class VoiceTemplateStore(context: Context) {
 
@@ -37,6 +37,10 @@ class VoiceTemplateStore(context: Context) {
             templateFile.delete()
         }
         _samples.value = emptyList()
+    }
+
+    fun reload() {
+        _samples.value = loadFromDisk()
     }
 
     fun getAveragedSpeakerCentroid(): FloatArray? {
@@ -79,11 +83,23 @@ class VoiceTemplateStore(context: Context) {
                     val vec = FloatArray(vecArray.length()) { idx ->
                         vecArray.getDouble(idx).toFloat()
                     }
+                    val mfccJson = obj.optJSONArray("mfcc")
+                    val mfccSeq = if (mfccJson != null) {
+                        List(mfccJson.length()) { fIdx ->
+                            val frameArr = mfccJson.getJSONArray(fIdx)
+                            FloatArray(frameArr.length()) { cIdx ->
+                                frameArr.getDouble(cIdx).toFloat()
+                            }
+                        }
+                    } else {
+                        emptyList()
+                    }
                     add(
                         VoiceTemplateSample(
                             id = obj.getString("id"),
                             label = obj.getString("label"),
                             featureVector = vec,
+                            mfccSequence = mfccSeq,
                             durationMs = obj.optLong("durationMs", 1200L),
                             peakRms = obj.optDouble("peakRms", 0.0).toFloat(),
                             timestampMs = obj.optLong("timestampMs", 0L)
@@ -99,10 +115,17 @@ class VoiceTemplateStore(context: Context) {
         for (s in samples) {
             val vecArray = JSONArray()
             s.featureVector.forEach { vecArray.put(it.toDouble()) }
+            val mfccArray = JSONArray()
+            s.mfccSequence.forEach { frame ->
+                val frameArr = JSONArray()
+                frame.forEach { coeff -> frameArr.put(coeff.toDouble()) }
+                mfccArray.put(frameArr)
+            }
             val obj = JSONObject().apply {
                 put("id", s.id)
                 put("label", s.label)
                 put("vec", vecArray)
+                put("mfcc", mfccArray)
                 put("durationMs", s.durationMs)
                 put("peakRms", s.peakRms.toDouble())
                 put("timestampMs", s.timestampMs)
