@@ -107,7 +107,7 @@ fun AiBrainBehaviorCard(
                 Icon(imageVector = Icons.Default.Psychology, contentDescription = null, tint = CheetahCyan)
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "عقل المساعد الذكي وإعدادات التفكير (v0.4.0)",
+                    text = "عقل المساعد الذكي وإعدادات التفكير",
                     style = MaterialTheme.typography.titleMedium,
                     color = CheetahCyan
                 )

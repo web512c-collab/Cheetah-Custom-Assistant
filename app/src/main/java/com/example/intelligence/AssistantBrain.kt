@@ -99,7 +99,9 @@ class AssistantBrain(
             query = q,
             internetSearchEnabled = s.internetSearchEnabled,
             customSearxngUrl = s.customSearxngUrl,
-            maxResults = cap
+            maxResults = cap,
+            searchEngineMode = s.searchEngineMode,
+            autoSearchOrder = s.autoSearchOrder
         )
     },
     private val healthProvider: () -> DeviceHealthSnapshot = { DeviceHealthSnapshot() },

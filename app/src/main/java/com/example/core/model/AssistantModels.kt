@@ -158,11 +158,47 @@ data class TtsVoiceCandidate(
     val qualityScore: Int
 )
 
+enum class SearchEngineMode(val labelAr: String, val endpointDisclosureAr: String) {
+    DUCKDUCKGO(
+        labelAr = "DuckDuckGo (افتراضي)",
+        endpointDisclosureAr = "يستخدم واجهة DuckDuckGo Instant Answer JSON الرسمية + صفحة DuckDuckGo HTML العامة بدون مفتاح API."
+    ),
+    WIKIPEDIA(
+        labelAr = "Wikipedia (عربي / إنجليزي)",
+        endpointDisclosureAr = "يستخدم واجهة MediaWiki Search API و REST Summary الرسمية بدون مفتاح API (يتبع لغة السؤال)."
+    ),
+    SEARXNG(
+        labelAr = "SearXNG (خادم مخصص)",
+        endpointDisclosureAr = "يتصل بنقطة /search?format=json على خادم SearXNG HTTPS الذي تحدده."
+    ),
+    AUTO(
+        labelAr = "تلقائي Auto (بترتيب احتياطي)",
+        endpointDisclosureAr = "يجرب المحرك الأساسي أولاً، وينتقل تلقائياً للتالي في القائمة عند التعطل أو عدم وجود نتائج."
+    )
+}
+
+enum class ConcreteSearchEngine(val labelAr: String) {
+    DUCKDUCKGO("DuckDuckGo"),
+    WIKIPEDIA("Wikipedia"),
+    SEARXNG("SearXNG")
+}
+
+data class SearchEngineTestResult(
+    val success: Boolean,
+    val messageAr: String,
+    val resultCount: Int = 0,
+    val responseTimeMs: Long = 0L,
+    val engineUsed: String = ""
+)
+
 data class WebSearchSource(
     val title: String,
     val snippet: String,
     val url: String,
-    val provider: String
+    val provider: String,
+    val sourceDomain: String = "",
+    val publishedDate: String? = null,
+    val engineName: String = provider
 )
 
 data class WebSearchOutcome(
@@ -170,7 +206,9 @@ data class WebSearchOutcome(
     val summaryText: String,
     val sources: List<WebSearchSource> = emptyList(),
     val fromCache: Boolean = false,
-    val errorAr: String? = null
+    val errorAr: String? = null,
+    val engineUsed: String = "",
+    val responseTimeMs: Long = 0L
 )
 
 data class EndLineRule(
@@ -285,15 +323,22 @@ data class AssistantSettings(
     val overlayFeatureEnabled: Boolean = false,
     val micPermissionRequestedOnce: Boolean = false,
     val notifPermissionRequestedOnce: Boolean = false,
-    // Optional keyless HTTPS search (Part D) - OFF by default
+    // Optional keyless HTTPS search (Part D & v0.4.1 Search Engine selector) - OFF by default
     val internetSearchEnabled: Boolean = false,
+    val searchEngineMode: SearchEngineMode = SearchEngineMode.DUCKDUCKGO,
+    val autoSearchOrder: List<ConcreteSearchEngine> = DEFAULT_AUTO_ENGINE_ORDER,
     val customSearxngUrl: String = "",
     val trustedDomains: List<String> = DEFAULT_TRUSTED_DOMAINS,
     val untrustedDomains: List<String> = DEFAULT_UNTRUSTED_DOMAINS,
-    // Local GGUF LLM config (Part B & v0.4.0 AI Brain)
+    // Local GGUF LLM config (Part B & v0.4.x AI Brain)
     val localLlmConfig: LocalLlmConfig = LocalLlmConfig()
 ) {
     companion object {
+        val DEFAULT_AUTO_ENGINE_ORDER = listOf(
+            ConcreteSearchEngine.DUCKDUCKGO,
+            ConcreteSearchEngine.WIKIPEDIA,
+            ConcreteSearchEngine.SEARXNG
+        )
         val DEFAULT_TRUSTED_DOMAINS = listOf(
             "wikipedia.org",
             "ar.wikipedia.org",

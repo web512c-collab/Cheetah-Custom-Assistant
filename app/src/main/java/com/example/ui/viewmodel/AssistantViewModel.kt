@@ -12,6 +12,8 @@ import com.example.core.model.AiMode
 import com.example.core.model.AssistantGender
 import com.example.core.model.AssistantPipelineState
 import com.example.core.model.AssistantSettings
+import com.example.core.model.ChatTemplateFamily
+import com.example.core.model.ConcreteSearchEngine
 import com.example.core.model.ConversationContextState
 import com.example.core.model.EndLineRule
 import com.example.core.model.GgufModelMetadata
@@ -24,6 +26,8 @@ import com.example.core.model.PerformanceProfile
 import com.example.core.model.PermissionHealthState
 import com.example.core.model.PersonaTone
 import com.example.core.model.ProposedAction
+import com.example.core.model.SearchEngineMode
+import com.example.core.model.SearchEngineTestResult
 import com.example.core.model.TransitionLogEntry
 import com.example.core.model.VoiceTemplateSample
 import com.example.core.model.WakeDiagnosticSnapshot
@@ -35,6 +39,7 @@ import com.example.guardrails.CommandGuardrailValidator
 import com.example.intelligence.AssistantCommandProcessor
 import com.example.intelligence.ReasoningOutputParser
 import com.example.llm.LocalLlmManager
+import com.example.search.OnlineSearchManager
 import com.example.voice.BundledYaSheetaAcousticModel
 import com.example.voice.CheetahRuntimeBus
 import com.example.voice.EgyptianOfflineSttManager
@@ -104,6 +109,12 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     private val _isBenchmarkRunning = MutableStateFlow(false)
     val isBenchmarkRunning: StateFlow<Boolean> = _isBenchmarkRunning.asStateFlow()
+
+    private val _isTestingSearch = MutableStateFlow(false)
+    val isTestingSearch: StateFlow<Boolean> = _isTestingSearch.asStateFlow()
+
+    private val _searchTestResult = MutableStateFlow<SearchEngineTestResult?>(null)
+    val searchTestResult: StateFlow<SearchEngineTestResult?> = _searchTestResult.asStateFlow()
 
     private val _offlineSttStatus = MutableStateFlow(sttManager.inspectCapability())
     val offlineSttStatus: StateFlow<OfflineSttStatus> = _offlineSttStatus.asStateFlow()
@@ -691,10 +702,73 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    // Part D: Optional Keyless Internet Search (OFF by default)
-    fun setInternetSearch(enabled: Boolean, customSearxngUrl: String? = null) {
+    // Part D & v0.4.1: Optional Keyless Internet Search & Engine Selector (OFF by default)
+    fun setInternetSearch(
+        enabled: Boolean,
+        customSearxngUrl: String? = null,
+        engineMode: SearchEngineMode? = null,
+        autoSearchOrder: List<ConcreteSearchEngine>? = null
+    ) {
         viewModelScope.launch {
-            settingsRepo.setInternetSearch(enabled, customSearxngUrl)
+            settingsRepo.setInternetSearch(
+                enabled = enabled,
+                customSearxngUrl = customSearxngUrl,
+                engineMode = engineMode,
+                autoSearchOrder = autoSearchOrder
+            )
+            if (!enabled) {
+                _searchTestResult.value = null
+            }
+        }
+    }
+
+    fun selectSearchEngine(mode: SearchEngineMode) {
+        viewModelScope.launch {
+            val current = settingsRepo.currentSettings()
+            settingsRepo.setInternetSearch(
+                enabled = current.internetSearchEnabled,
+                engineMode = mode
+            )
+            _searchTestResult.value = null
+        }
+    }
+
+    fun updateAutoSearchOrder(order: List<ConcreteSearchEngine>) {
+        viewModelScope.launch {
+            val current = settingsRepo.currentSettings()
+            settingsRepo.setInternetSearch(
+                enabled = current.internetSearchEnabled,
+                autoSearchOrder = order
+            )
+        }
+    }
+
+    fun testSearxngConnection(customUrl: String) {
+        if (_isTestingSearch.value) return
+        viewModelScope.launch {
+            _isTestingSearch.value = true
+            try {
+                val s = settingsRepo.currentSettings()
+                _searchTestResult.value = OnlineSearchManager.testSearxngConnection(
+                    customSearxngUrl = customUrl,
+                    internetSearchEnabled = s.internetSearchEnabled
+                )
+            } finally {
+                _isTestingSearch.value = false
+            }
+        }
+    }
+
+    fun testSearchWithSelectedEngine() {
+        if (_isTestingSearch.value) return
+        viewModelScope.launch {
+            _isTestingSearch.value = true
+            try {
+                val s = settingsRepo.currentSettings()
+                _searchTestResult.value = OnlineSearchManager.testEngineSearch(s)
+            } finally {
+                _isTestingSearch.value = false
+            }
         }
     }
 

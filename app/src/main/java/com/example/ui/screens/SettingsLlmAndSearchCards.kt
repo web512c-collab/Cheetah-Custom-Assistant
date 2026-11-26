@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Badge
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -24,6 +26,7 @@ import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
@@ -58,10 +61,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.core.model.AssistantGender
 import com.example.core.model.AssistantSettings
+import com.example.core.model.ConcreteSearchEngine
 import com.example.core.model.GgufModelMetadata
 import com.example.core.model.LocalLlmLoadState
 import com.example.core.model.LocalLlmRuntimeStatus
 import com.example.core.model.LocalLlmStorageMode
+import com.example.core.model.SearchEngineMode
+import com.example.core.model.SearchEngineTestResult
 import com.example.search.OnlineSearchManager
 import com.example.ui.theme.CheetahAmber
 import com.example.ui.theme.CheetahBorder
@@ -604,13 +610,22 @@ fun LocalGgufLlmCard(
 @Composable
 fun KeylessInternetSearchCard(
     settings: AssistantSettings,
+    isTestingSearch: Boolean = false,
+    searchTestResult: SearchEngineTestResult? = null,
     onToggleInternetSearch: (Boolean) -> Unit,
-    onSaveCustomSearxngUrl: (String) -> Unit
+    onSaveCustomSearxngUrl: (String) -> Unit,
+    onSelectSearchEngine: (SearchEngineMode) -> Unit = {},
+    onUpdateAutoSearchOrder: (List<ConcreteSearchEngine>) -> Unit = {},
+    onTestSearxngConnection: (String) -> Unit = {},
+    onTestSearch: () -> Unit = {}
 ) {
     var draftSearxngUrl by remember(settings.customSearxngUrl) {
         mutableStateOf(settings.customSearxngUrl)
     }
     val urlInvalid = draftSearxngUrl.isNotBlank() && !OnlineSearchManager.isValidHttpsUrl(draftSearxngUrl)
+    val effectiveOrder = remember(settings.autoSearchOrder) {
+        OnlineSearchManager.normalizeOrder(settings.autoSearchOrder)
+    }
 
     Card(
         colors = CardDefaults.cardColors(containerColor = CheetahCard),
@@ -638,7 +653,7 @@ fun KeylessInternetSearchCard(
                         )
                         Text(
                             text = if (settings.internetSearchEnabled) {
-                                "مفعّل: يبحث عبر Wikipedia و DuckDuckGo HTTPS ويُلخص النتائج مع المصادر."
+                                "مفعّل: المحرك المختار حالياً هو ${settings.searchEngineMode.labelAr}."
                             } else {
                                 "مقفول افتراضياً: التطبيق أوفلاين 100% ولا يرسل أي طلبات شبكة."
                             },
@@ -662,7 +677,7 @@ fun KeylessInternetSearchCard(
                 border = BorderStroke(1.dp, CheetahBorder)
             ) {
                 Text(
-                    text = "ضمان الخصوصية: عند تفعيل الميزة، يتم إرسال نص سؤال البحث فقط عبر HTTPS بدون أي مفاتيح API، ولا يتم إرسال الصوت أو السجل أو أي بيانات شخصية مطلقاً.",
+                    text = "ضمان الخصوصية: عند تفعيل الميزة، يتم إرسال نص سؤال البحث فقط عبر HTTPS بدون أي مفاتيح API أو خدمات مدفوعة، ولا يتم إرسال الصوت أو السجل أو أي بيانات شخصية مطلقاً.",
                     style = MaterialTheme.typography.bodySmall,
                     color = CheetahTextSecondary,
                     modifier = Modifier.padding(10.dp)
@@ -670,6 +685,148 @@ fun KeylessInternetSearchCard(
             }
 
             if (settings.internetSearchEnabled) {
+                Spacer(modifier = Modifier.height(14.dp))
+                Text(
+                    text = "محرك البحث (Search Engine):",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = CheetahCyan
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    SearchEngineMode.entries.chunked(2).forEach { pair ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            pair.forEach { mode ->
+                                val selected = settings.searchEngineMode == mode
+                                Surface(
+                                    color = if (selected) CheetahEmerald.copy(alpha = 0.18f) else CheetahDeepNavy,
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(48.dp)
+                                        .border(
+                                            1.dp,
+                                            if (selected) CheetahEmerald else CheetahBorder,
+                                            RoundedCornerShape(12.dp)
+                                        )
+                                        .clickable { onSelectSearchEngine(mode) }
+                                        .testTag("settings_search_engine_${mode.name.lowercase()}")
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.Center,
+                                        modifier = Modifier.padding(horizontal = 8.dp)
+                                    ) {
+                                        Text(
+                                            text = mode.labelAr,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = if (selected) CheetahEmerald else CheetahTextPrimary,
+                                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    color = CheetahDeepNavy,
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, CheetahBorder)
+                ) {
+                    Text(
+                        text = "طبيعة المصدر: ${settings.searchEngineMode.endpointDisclosureAr}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = CheetahTextSecondary,
+                        modifier = Modifier.padding(10.dp)
+                    )
+                }
+
+                // Editable fallback order when Auto is chosen
+                if (settings.searchEngineMode == SearchEngineMode.AUTO) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "ترتيب المحركات في الوضع التلقائي (الأولوية من الأعلى للأسفل):",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = CheetahAmber
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        effectiveOrder.forEachIndexed { idx, engine ->
+                            Surface(
+                                color = CheetahDeepNavy,
+                                shape = RoundedCornerShape(10.dp),
+                                border = BorderStroke(1.dp, CheetahBorder)
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = "${idx + 1}. ${engine.labelAr}",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = CheetahTextPrimary,
+                                        fontWeight = if (idx == 0) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                    Row {
+                                        TextButton(
+                                            onClick = {
+                                                if (idx > 0) {
+                                                    val mutable = effectiveOrder.toMutableList()
+                                                    val tmp = mutable[idx - 1]
+                                                    mutable[idx - 1] = mutable[idx]
+                                                    mutable[idx] = tmp
+                                                    onUpdateAutoSearchOrder(mutable)
+                                                }
+                                            },
+                                            enabled = idx > 0,
+                                            modifier = Modifier
+                                                .size(48.dp)
+                                                .testTag("settings_engine_up_${engine.name.lowercase()}")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.ArrowUpward,
+                                                contentDescription = "رفع ${engine.labelAr} للأعلى",
+                                                tint = if (idx > 0) CheetahCyan else CheetahTextSecondary
+                                            )
+                                        }
+                                        TextButton(
+                                            onClick = {
+                                                if (idx < effectiveOrder.lastIndex) {
+                                                    val mutable = effectiveOrder.toMutableList()
+                                                    val tmp = mutable[idx + 1]
+                                                    mutable[idx + 1] = mutable[idx]
+                                                    mutable[idx] = tmp
+                                                    onUpdateAutoSearchOrder(mutable)
+                                                }
+                                            },
+                                            enabled = idx < effectiveOrder.lastIndex,
+                                            modifier = Modifier
+                                                .size(48.dp)
+                                                .testTag("settings_engine_down_${engine.name.lowercase()}")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.ArrowDownward,
+                                                contentDescription = "تنزيل ${engine.labelAr} للأسفل",
+                                                tint = if (idx < effectiveOrder.lastIndex) CheetahCyan else CheetahTextSecondary
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Custom SearXNG URL + Save + Test connection
                 Spacer(modifier = Modifier.height(12.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -678,7 +835,7 @@ fun KeylessInternetSearchCard(
                     OutlinedTextField(
                         value = draftSearxngUrl,
                         onValueChange = { draftSearxngUrl = it },
-                        label = { Text("رابط SearXNG اختياري (HTTPS فقط)") },
+                        label = { Text("رابط SearXNG (HTTPS فقط)") },
                         placeholder = { Text("https://searx.example.org") },
                         singleLine = true,
                         isError = urlInvalid,
@@ -699,7 +856,9 @@ fun KeylessInternetSearchCard(
                         },
                         enabled = !urlInvalid,
                         colors = ButtonDefaults.buttonColors(containerColor = CheetahCyan),
-                        modifier = Modifier.height(52.dp)
+                        modifier = Modifier
+                            .height(52.dp)
+                            .testTag("settings_save_searxng_btn")
                     ) {
                         Text("حفظ", color = CheetahObsidian, fontWeight = FontWeight.Bold)
                     }
@@ -710,6 +869,73 @@ fun KeylessInternetSearchCard(
                         style = MaterialTheme.typography.labelSmall,
                         color = CheetahCrimson
                     )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            if (!urlInvalid) {
+                                onSaveCustomSearxngUrl(draftSearxngUrl.trim())
+                                onTestSearxngConnection(draftSearxngUrl.trim())
+                            }
+                        },
+                        enabled = !isTestingSearch && draftSearxngUrl.isNotBlank() && !urlInvalid,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("settings_test_searxng_btn")
+                    ) {
+                        Text("اختبار اتصال SearXNG", color = CheetahAmber)
+                    }
+
+                    Button(
+                        onClick = onTestSearch,
+                        enabled = !isTestingSearch,
+                        colors = ButtonDefaults.buttonColors(containerColor = CheetahEmerald),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("settings_test_search_btn")
+                    ) {
+                        Icon(Icons.Default.Search, contentDescription = null, tint = CheetahObsidian, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (isTestingSearch) "جاري الفحص..." else "تجربة البحث الآن",
+                            color = CheetahObsidian,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                if (isTestingSearch) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LinearProgressIndicator(
+                        color = CheetahEmerald,
+                        trackColor = CheetahDeepNavy,
+                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp))
+                    )
+                }
+
+                if (searchTestResult != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    val resultColor = if (searchTestResult.success) CheetahEmerald else CheetahCrimson
+                    Surface(
+                        color = resultColor.copy(alpha = 0.14f),
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, resultColor.copy(alpha = 0.5f)),
+                        modifier = Modifier.testTag("settings_search_test_result")
+                    ) {
+                        Text(
+                            text = searchTestResult.messageAr,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = resultColor,
+                            modifier = Modifier.padding(10.dp)
+                        )
+                    }
                 }
             }
         }

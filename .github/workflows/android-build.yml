@@ -6,7 +6,14 @@ on:
       - main
     tags:
       - 'v*'
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Optional release tag (e.g. v0.4.1) to create or update a GitHub Release and attach the APK'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -57,8 +64,35 @@ jobs:
             fi
           fi
 
+      - name: Resolve release metadata and version tag
+        id: release_meta
+        run: |
+          EVENT_NAME="${{ github.event_name }}"
+          INPUT_TAG="${{ github.event.inputs.tag }}"
+          RELEASE_EVENT_TAG="${{ github.event.release.tag_name }}"
+          APP_VER=$(grep -E 'versionName\s*=' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+
+          if [ "$EVENT_NAME" = "release" ] && [ -n "$RELEASE_EVENT_TAG" ]; then
+            VERSION_TAG="$RELEASE_EVENT_TAG"
+            SHOULD_RELEASE="true"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION_TAG="${GITHUB_REF_NAME}"
+            SHOULD_RELEASE="true"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_TAG" ]; then
+            VERSION_TAG="$INPUT_TAG"
+            SHOULD_RELEASE="true"
+          else
+            VERSION_TAG="v${APP_VER}"
+            SHOULD_RELEASE="false"
+          fi
+
+          echo "Event: $EVENT_NAME | Ref: $GITHUB_REF | Tag: $VERSION_TAG | ShouldRelease: $SHOULD_RELEASE"
+          echo "tag=$VERSION_TAG" >> "$GITHUB_OUTPUT"
+          echo "should_release=$SHOULD_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "VERSION_TAG=$VERSION_TAG" >> "$GITHUB_ENV"
+
       - name: Run core JVM unit tests
-        run: ./gradlew :app:testDebugUnitTest --tests "com.example.CheetahCoreUnitTest" --tests "com.example.WakeWordBinaryModelTest" --tests "com.example.WakeStateMachineUnitTest" --tests "com.example.V030FeaturesUnitTest" --tests "com.example.V040AiBrainUnitTest" --tests "com.example.ExampleUnitTest" --no-daemon
+        run: ./gradlew :app:testDebugUnitTest --tests "com.example.CheetahCoreUnitTest" --tests "com.example.WakeWordBinaryModelTest" --tests "com.example.WakeStateMachineUnitTest" --tests "com.example.V030FeaturesUnitTest" --tests "com.example.V040AiBrainUnitTest" --tests "com.example.V041SearchEnginesUnitTest" --tests "com.example.ExampleUnitTest" --no-daemon
 
       - name: Run Robolectric smoke test (non-blocking)
         continue-on-error: true
@@ -67,24 +101,43 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew assembleDebug --no-daemon
 
-      - name: Package versioned Debug APK
+      - name: Package & verify versioned Debug APK
+        id: package_apk
         run: |
-          mkdir -p dist
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION_TAG="${GITHUB_REF_NAME}"
+          echo "=== Contents of app/build/outputs/apk/debug/ ==="
+          ls -la app/build/outputs/apk/debug/ || true
+
+          SOURCE_APK=""
+          if [ -f "app/build/outputs/apk/debug/app-debug.apk" ]; then
+            SOURCE_APK="app/build/outputs/apk/debug/app-debug.apk"
           else
-            APP_VER=$(grep -E 'versionName\s*=' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
-            VERSION_TAG="v${APP_VER}"
+            SOURCE_APK=$(find app/build/outputs/apk/debug -maxdepth 2 -type f -name '*.apk' | sort | head -n 1)
           fi
-          echo "VERSION_TAG=$VERSION_TAG" >> "$GITHUB_ENV"
-          cp app/build/outputs/apk/debug/app-debug.apk "dist/Cheetah-${VERSION_TAG}-debug.apk"
+
+          if [ -z "$SOURCE_APK" ] || [ ! -s "$SOURCE_APK" ]; then
+            echo "::error::Built Debug APK not found or empty under app/build/outputs/apk/debug/"
+            exit 1
+          fi
+
+          mkdir -p dist
+          APK_NAME="Cheetah-${{ steps.release_meta.outputs.tag }}-debug.apk"
+          DEST_APK="dist/${APK_NAME}"
+          cp -f "$SOURCE_APK" "$DEST_APK"
+
+          if [ ! -s "$DEST_APK" ]; then
+            echo "::error::Failed to produce non-empty versioned APK at $DEST_APK"
+            exit 1
+          fi
+
           ls -lh dist/
+          echo "apk_path=$DEST_APK" >> "$GITHUB_OUTPUT"
+          echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: cheetah-debug-apk
-          path: dist/Cheetah-*-debug.apk
+          path: ${{ steps.package_apk.outputs.apk_path }}
           if-no-files-found: error
 
       - name: Check optional release signing secrets
@@ -114,7 +167,7 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 --decode > my-upload-key.jks
           ./gradlew assembleRelease --no-daemon
           if [ -f app/build/outputs/apk/release/app-release.apk ]; then
-            cp app/build/outputs/apk/release/app-release.apk "dist/Cheetah-${VERSION_TAG}-release.apk"
+            cp app/build/outputs/apk/release/app-release.apk "dist/Cheetah-${{ steps.release_meta.outputs.tag }}-release.apk"
           fi
 
       - name: Clean up decoded release keystore
@@ -130,22 +183,34 @@ jobs:
           if-no-files-found: ignore
 
       - name: Extract release notes from CHANGELOG.md
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.release_meta.outputs.should_release == 'true'
         run: |
-          awk -v tag="$VERSION_TAG" '
+          mkdir -p dist
+          awk -v tag="${{ steps.release_meta.outputs.tag }}" '
             index($0, "## " tag " ") == 1 || index($0, "## " tag "(") == 1 || $0 == "## " tag { in_section=1; next }
             in_section && index($0, "## v") == 1 { exit }
             in_section { print }
           ' CHANGELOG.md > dist/RELEASE_NOTES.md || true
           if [ ! -s dist/RELEASE_NOTES.md ]; then
-            echo "Cheetah Custom Assistant ${VERSION_TAG} pre-release. See CHANGELOG.md for details." > dist/RELEASE_NOTES.md
+            echo "Cheetah Custom Assistant ${{ steps.release_meta.outputs.tag }} pre-release. See CHANGELOG.md for details." > dist/RELEASE_NOTES.md
           fi
+          cat dist/RELEASE_NOTES.md
 
-      - name: Publish GitHub Release on tag (v*)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish or Update GitHub Release with APK
+        id: gh_release
+        if: steps.release_meta.outputs.should_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          prerelease: true
+          tag_name: ${{ steps.release_meta.outputs.tag }}
+          name: Cheetah Custom Assistant ${{ steps.release_meta.outputs.tag }}
           body_path: dist/RELEASE_NOTES.md
+          prerelease: true
           fail_on_unmatched_files: true
-          files: dist/*.apk
+          files: ${{ steps.package_apk.outputs.apk_path }}
+
+      - name: Print published release URL and attached asset
+        if: steps.release_meta.outputs.should_release == 'true'
+        run: |
+          echo "Published Release URL: ${{ steps.gh_release.outputs.url }}"
+          echo "Attached APK Asset Name: ${{ steps.package_apk.outputs.apk_name }}"
+          echo "Attached APK Asset Path: ${{ steps.package_apk.outputs.apk_path }}"

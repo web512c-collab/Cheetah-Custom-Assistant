@@ -75,12 +75,15 @@ import androidx.compose.ui.unit.dp
 import com.example.core.model.AiMode
 import com.example.core.model.AssistantGender
 import com.example.core.model.AssistantSettings
+import com.example.core.model.ConcreteSearchEngine
 import com.example.core.model.ConversationContextState
 import com.example.core.model.EndLineRule
 import com.example.core.model.LocalLlmRuntimeStatus
 import com.example.core.model.PerformanceProfile
 import com.example.core.model.PermissionHealthState
 import com.example.core.model.PersonaTone
+import com.example.core.model.SearchEngineMode
+import com.example.core.model.SearchEngineTestResult
 import com.example.core.model.TransitionLogEntry
 import com.example.core.model.VoiceTemplateSample
 import com.example.core.model.WakeDiagnosticSnapshot
@@ -120,6 +123,8 @@ fun SettingsScreen(
     enrollmentAmplitude: Float,
     enrollmentFeedbackAr: String?,
     isBenchmarkRunning: Boolean = false,
+    isTestingSearch: Boolean = false,
+    searchTestResult: SearchEngineTestResult? = null,
     onLaunchDefaultAssistantPicker: () -> Unit,
     onOpenVoiceInputSettings: () -> Unit,
     onUpdateIdentityAndGender: (String?, AssistantGender?, AssistantGender?, String?) -> Unit,
@@ -153,6 +158,10 @@ fun SettingsScreen(
     onUpdateDomainLists: (List<String>, List<String>) -> Unit = { _, _ -> },
     onRunBenchmark: () -> Unit = {},
     onSetInternetSearch: (Boolean, String?) -> Unit,
+    onSelectSearchEngine: (SearchEngineMode) -> Unit = {},
+    onUpdateAutoSearchOrder: (List<ConcreteSearchEngine>) -> Unit = {},
+    onTestSearxngConnection: (String) -> Unit = {},
+    onTestSearchEngine: () -> Unit = {},
     onRunMicDiagnosticTest: () -> Unit,
     onMarkFalseActivation: () -> Unit,
     onResetDiagnosticCounters: () -> Unit,
@@ -864,12 +873,18 @@ fun SettingsScreen(
                 )
             }
 
-            // 6. OPTIONAL KEYLESS INTERNET SEARCH (PART D)
+            // 6. OPTIONAL KEYLESS INTERNET SEARCH & ENGINE SELECTOR (PART D + v0.4.1)
             item {
                 KeylessInternetSearchCard(
                     settings = settings,
+                    isTestingSearch = isTestingSearch,
+                    searchTestResult = searchTestResult,
                     onToggleInternetSearch = { en -> onSetInternetSearch(en, null) },
-                    onSaveCustomSearxngUrl = { url -> onSetInternetSearch(settings.internetSearchEnabled, url) }
+                    onSaveCustomSearxngUrl = { url -> onSetInternetSearch(settings.internetSearchEnabled, url) },
+                    onSelectSearchEngine = onSelectSearchEngine,
+                    onUpdateAutoSearchOrder = onUpdateAutoSearchOrder,
+                    onTestSearxngConnection = onTestSearxngConnection,
+                    onTestSearch = onTestSearchEngine
                 )
             }
 

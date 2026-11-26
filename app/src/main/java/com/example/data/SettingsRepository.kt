@@ -14,11 +14,13 @@ import com.example.core.model.AiMode
 import com.example.core.model.AssistantGender
 import com.example.core.model.AssistantSettings
 import com.example.core.model.ChatTemplateFamily
+import com.example.core.model.ConcreteSearchEngine
 import com.example.core.model.EndLineRule
 import com.example.core.model.LocalLlmConfig
 import com.example.core.model.LocalLlmStorageMode
 import com.example.core.model.PerformanceProfile
 import com.example.core.model.PersonaTone
+import com.example.core.model.SearchEngineMode
 import com.example.core.model.WakeWordSetupMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -60,8 +62,10 @@ class SettingsRepository(private val context: Context) {
         val MIC_ASKED_ONCE = booleanPreferencesKey("mic_asked_once")
         val NOTIF_ASKED_ONCE = booleanPreferencesKey("notif_asked_once")
 
-        // Part D Keyless Internet Search (OFF by default)
+        // Part D & v0.4.1 Keyless Internet Search (OFF by default)
         val INTERNET_SEARCH_ENABLED = booleanPreferencesKey("internet_search_enabled")
+        val SEARCH_ENGINE_MODE = stringPreferencesKey("search_engine_mode")
+        val AUTO_SEARCH_ORDER = stringPreferencesKey("auto_search_order")
         val CUSTOM_SEARXNG_URL = stringPreferencesKey("custom_searxng_url")
         val TRUSTED_DOMAINS = stringPreferencesKey("trusted_domains")
         val UNTRUSTED_DOMAINS = stringPreferencesKey("untrusted_domains")
@@ -129,6 +133,15 @@ class SettingsRepository(private val context: Context) {
             micPermissionRequestedOnce = prefs[Keys.MIC_ASKED_ONCE] ?: false,
             notifPermissionRequestedOnce = prefs[Keys.NOTIF_ASKED_ONCE] ?: false,
             internetSearchEnabled = prefs[Keys.INTERNET_SEARCH_ENABLED] ?: false,
+            searchEngineMode = prefs[Keys.SEARCH_ENGINE_MODE]?.let {
+                runCatching { SearchEngineMode.valueOf(it) }.getOrNull()
+            } ?: SearchEngineMode.DUCKDUCKGO,
+            autoSearchOrder = prefs[Keys.AUTO_SEARCH_ORDER]?.let { raw ->
+                val parsed = raw.split(',').mapNotNull { token ->
+                    runCatching { ConcreteSearchEngine.valueOf(token.trim()) }.getOrNull()
+                }
+                if (parsed.isNotEmpty()) parsed.distinct() else null
+            } ?: AssistantSettings.DEFAULT_AUTO_ENGINE_ORDER,
             customSearxngUrl = prefs[Keys.CUSTOM_SEARXNG_URL].orEmpty(),
             trustedDomains = prefs[Keys.TRUSTED_DOMAINS]?.let { raw ->
                 raw.split(',').map { d -> d.trim().lowercase() }.filter { d -> d.isNotEmpty() }
@@ -298,11 +311,23 @@ class SettingsRepository(private val context: Context) {
         }
     }
 
-    suspend fun setInternetSearch(enabled: Boolean, customSearxngUrl: String? = null) {
+    suspend fun setInternetSearch(
+        enabled: Boolean,
+        customSearxngUrl: String? = null,
+        engineMode: SearchEngineMode? = null,
+        autoSearchOrder: List<ConcreteSearchEngine>? = null
+    ) {
         context.cheetahDataStore.edit { prefs ->
             prefs[Keys.INTERNET_SEARCH_ENABLED] = enabled
             if (customSearxngUrl != null) {
                 prefs[Keys.CUSTOM_SEARXNG_URL] = customSearxngUrl.trim()
+            }
+            if (engineMode != null) {
+                prefs[Keys.SEARCH_ENGINE_MODE] = engineMode.name
+            }
+            if (autoSearchOrder != null) {
+                val normalized = autoSearchOrder.distinct().ifEmpty { AssistantSettings.DEFAULT_AUTO_ENGINE_ORDER }
+                prefs[Keys.AUTO_SEARCH_ORDER] = normalized.joinToString(",") { it.name }
             }
         }
     }

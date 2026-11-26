@@ -155,6 +155,8 @@ fun CheetahAppRoot(
     val pendingContinuationText by viewModel.pendingContinuationText.collectAsStateWithLifecycle()
     val pendingProposedAction by viewModel.pendingProposedAction.collectAsStateWithLifecycle()
     val isBenchmarkRunning by viewModel.isBenchmarkRunning.collectAsStateWithLifecycle()
+    val isTestingSearch by viewModel.isTestingSearch.collectAsStateWithLifecycle()
+    val searchTestResult by viewModel.searchTestResult.collectAsStateWithLifecycle()
 
     LaunchedEffect(resumeWakeFromBoot) {
         if (resumeWakeFromBoot) {
@@ -387,6 +389,8 @@ fun CheetahAppRoot(
                                 enrollmentAmplitude = enrollmentAmplitude,
                                 enrollmentFeedbackAr = enrollmentFeedbackAr,
                                 isBenchmarkRunning = isBenchmarkRunning,
+                                isTestingSearch = isTestingSearch,
+                                searchTestResult = searchTestResult,
                                 onLaunchDefaultAssistantPicker = {
                                     roleLauncher.launch(
                                         PermissionHealthChecker.buildDefaultAssistantIntent(context)
@@ -470,6 +474,10 @@ fun CheetahAppRoot(
                                 },
                                 onRunBenchmark = { viewModel.runModelBenchmark() },
                                 onSetInternetSearch = { en, url -> viewModel.setInternetSearch(en, url) },
+                                onSelectSearchEngine = { mode -> viewModel.selectSearchEngine(mode) },
+                                onUpdateAutoSearchOrder = { order -> viewModel.updateAutoSearchOrder(order) },
+                                onTestSearxngConnection = { url -> viewModel.testSearxngConnection(url) },
+                                onTestSearchEngine = { viewModel.testSearchWithSelectedEngine() },
                                 onRunMicDiagnosticTest = { viewModel.runControlledMicDiagnosticTest() },
                                 onMarkFalseActivation = { viewModel.markFalseActivation() },
                                 onResetDiagnosticCounters = { viewModel.resetDiagnosticCounters() },

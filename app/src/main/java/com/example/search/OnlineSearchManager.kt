@@ -1,5 +1,9 @@
 package com.example.search
 
+import com.example.core.model.AssistantSettings
+import com.example.core.model.ConcreteSearchEngine
+import com.example.core.model.SearchEngineMode
+import com.example.core.model.SearchEngineTestResult
 import com.example.core.model.WebSearchOutcome
 import com.example.core.model.WebSearchSource
 import com.example.voice.CheetahRuntimeBus
@@ -9,19 +13,22 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.LinkedHashMap
 
 /**
- * Keyless HTTPS internet search manager (Part D).
+ * Keyless HTTPS internet search manager (Part D + v0.4.1 Search Engine Selector).
+ *
  * Privacy & security guarantees:
  * 1. Strictly gated behind settings.internetSearchEnabled (OFF by default).
  * 2. Sends ONLY the cleaned search query text (never mic audio, conversation memory, or PII).
  * 3. HTTPS-only with explicit connect/read timeouts, User-Agent, LRU TTL cache, and rate limiter.
- * 4. Uses keyless public endpoints:
- *    - Optional user-configured HTTPS SearXNG JSON endpoint
- *    - Wikipedia REST / Search API (Arabic for Arabic queries, English fallback)
- *    - DuckDuckGo Instant Answer JSON API
+ * 4. Honest endpoint disclosure:
+ *    - DuckDuckGo: Instant Answer public JSON API + DuckDuckGo HTML public endpoint (scraped gracefully).
+ *    - Wikipedia: Official MediaWiki Search JSON API & REST Summary API (no key required).
+ *    - SearXNG: User-configured HTTPS instance `/search?format=json` JSON endpoint.
+ *    - Auto: User-ordered fallback across DuckDuckGo, Wikipedia, and SearXNG.
  */
 object OnlineSearchManager {
 
@@ -30,7 +37,15 @@ object OnlineSearchManager {
     private const val CACHE_TTL_MS = 15 * 60_000L
     private const val MAX_CACHE_SIZE = 24
     private const val MIN_REQUEST_INTERVAL_MS = 1_200L
-    private const val USER_AGENT = "CheetahCustomAssistant/0.4.0 (Android; KeylessSearch)"
+    private const val USER_AGENT = "CheetahCustomAssistant/0.4.1 (Android; KeylessSearch)"
+
+    private val DDG_HTML_LINK_REGEX = Regex(
+        """(?is)<a[^>]*class=["'][^"']*result__a[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>"""
+    )
+    private val DDG_HTML_SNIPPET_REGEX = Regex(
+        """(?is)<(?:a|div)[^>]*class=["'][^"']*result__snippet[^"']*["'][^>]*>(.*?)</(?:a|div)>"""
+    )
+    private val ISO_DATE_PREFIX_REGEX = Regex("""^(20\d{2}-\d{2}-\d{2})""")
 
     private data class CacheEntry(
         val outcome: WebSearchOutcome,
@@ -60,11 +75,22 @@ object OnlineSearchManager {
         synchronized(cacheLock) { lruCache.clear() }
     }
 
+    fun extractDomain(url: String): String {
+        return runCatching {
+            URL(url).host.lowercase().removePrefix("www.")
+        }.getOrDefault(
+            url.lowercase().substringAfter("://").substringBefore('/').removePrefix("www.")
+        )
+    }
+
     suspend fun search(
         query: String,
         internetSearchEnabled: Boolean,
         customSearxngUrl: String = "",
         maxResults: Int = 5,
+        searchEngineMode: SearchEngineMode = SearchEngineMode.AUTO,
+        autoSearchOrder: List<ConcreteSearchEngine> = AssistantSettings.DEFAULT_AUTO_ENGINE_ORDER,
+        bypassCache: Boolean = false,
         clockMs: () -> Long = { System.currentTimeMillis() },
         fetcher: (String) -> String = { url -> httpGetHttps(url) }
     ): WebSearchOutcome = withContext(Dispatchers.IO) {
@@ -86,75 +112,110 @@ object OnlineSearchManager {
         }
 
         val requestedCap = maxResults.coerceIn(1, 8)
-        val now = clockMs()
-        val cacheKey = "${cleanQuery.lowercase()}|${customSearxngUrl.trim()}|$requestedCap"
-        synchronized(cacheLock) {
-            val hit = lruCache[cacheKey]
-            if (hit != null && (now - hit.cachedAtMs) <= CACHE_TTL_MS) {
-                return@withContext hit.outcome.copy(fromCache = true)
+        val effectiveOrder = normalizeOrder(autoSearchOrder)
+        val cacheKey = buildString {
+            append(cleanQuery.lowercase())
+            append('|').append(searchEngineMode.name)
+            append('|').append(effectiveOrder.joinToString(",") { it.name })
+            append('|').append(customSearxngUrl.trim())
+            append('|').append(requestedCap)
+        }
+
+        if (!bypassCache) {
+            val now = clockMs()
+            synchronized(cacheLock) {
+                val hit = lruCache[cacheKey]
+                if (hit != null && (now - hit.cachedAtMs) <= CACHE_TTL_MS) {
+                    return@withContext hit.outcome.copy(fromCache = true, responseTimeMs = 0L)
+                }
             }
         }
 
-        val elapsedSinceLast = now - lastNetworkCallMs
+        val nowBeforeLimit = clockMs()
+        val elapsedSinceLast = nowBeforeLimit - lastNetworkCallMs
         if (elapsedSinceLast in 0 until MIN_REQUEST_INTERVAL_MS) {
             kotlinx.coroutines.delay(MIN_REQUEST_INTERVAL_MS - elapsedSinceLast)
         }
-        lastNetworkCallMs = clockMs()
+        val startTimeMs = clockMs()
+        lastNetworkCallMs = startTimeMs
 
         CheetahRuntimeBus.setNetworkSearching(true)
         try {
-            val sources = mutableListOf<WebSearchSource>()
             val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
+            val isArabic = cleanQuery.any { it in '\u0600'..'\u06FF' }
 
-            // 1. Optional user-configured HTTPS SearXNG instance
-            if (isValidHttpsUrl(customSearxngUrl)) {
-                val base = customSearxngUrl.trim().trimEnd('/')
-                val searxUrl = "$base/search?q=$encoded&format=json&language=ar"
-                runCatching {
-                    parseSearxngJson(fetcher(searxUrl), maxItems = requestedCap)
-                }.onSuccess { list ->
-                    sources.addAll(list.take(requestedCap))
-                }
+            val enginesToTry: List<ConcreteSearchEngine> = when (searchEngineMode) {
+                SearchEngineMode.DUCKDUCKGO -> listOf(ConcreteSearchEngine.DUCKDUCKGO)
+                SearchEngineMode.WIKIPEDIA -> listOf(ConcreteSearchEngine.WIKIPEDIA)
+                SearchEngineMode.SEARXNG -> listOf(ConcreteSearchEngine.SEARXNG)
+                SearchEngineMode.AUTO -> effectiveOrder
             }
 
-            // 2. Wikipedia OpenSearch + Summary (keyless HTTPS, great for Arabic & general facts)
-            if (sources.size < requestedCap) {
-                val isArabic = cleanQuery.any { it in '\u0600'..'\u06FF' }
-                val wikiLang = if (isArabic) "ar" else "en"
-                runCatching {
-                    queryWikipedia(wikiLang, encoded, fetcher)
-                }.onSuccess { list ->
-                    sources.addAll(list)
-                }
-                if (sources.isEmpty() && isArabic) {
-                    runCatching {
-                        queryWikipedia("en", encoded, fetcher)
-                    }.onSuccess { list ->
-                        sources.addAll(list)
+            val errors = mutableListOf<String>()
+            var winningEngine = ""
+            val collected = mutableListOf<WebSearchSource>()
+
+            for (engine in enginesToTry) {
+                if (engine == ConcreteSearchEngine.SEARXNG && !isValidHttpsUrl(customSearxngUrl)) {
+                    if (searchEngineMode == SearchEngineMode.SEARXNG) {
+                        val elapsed = (clockMs() - startTimeMs).coerceAtLeast(0L)
+                        return@withContext WebSearchOutcome(
+                            query = cleanQuery,
+                            summaryText = "",
+                            sources = emptyList(),
+                            errorAr = "رابط خادم SearXNG غير مضبوط أو غير صالح (يجب أن يبدأ بـ https://).",
+                            engineUsed = "SearXNG",
+                            responseTimeMs = elapsed
+                        )
+                    } else {
+                        errors.add("SearXNG: رابط غير مضبوط")
+                        continue
                     }
                 }
-            }
 
-            // 3. DuckDuckGo Instant Answer JSON API (keyless HTTPS)
-            if (sources.size < requestedCap) {
-                val ddgUrl = "https://api.duckduckgo.com/?q=$encoded&format=json&no_html=1&skip_disambig=1"
-                runCatching {
-                    parseDuckDuckGoJson(fetcher(ddgUrl))
-                }.onSuccess { list ->
-                    sources.addAll(list)
+                val attempt = runCatching {
+                    executeEngine(
+                        engine = engine,
+                        cleanQuery = cleanQuery,
+                        encodedQuery = encoded,
+                        isArabic = isArabic,
+                        customSearxngUrl = customSearxngUrl,
+                        maxItems = requestedCap,
+                        fetcher = fetcher
+                    )
                 }
+
+                attempt.onSuccess { hits ->
+                    if (hits.isNotEmpty()) {
+                        collected.addAll(hits)
+                        if (winningEngine.isBlank()) winningEngine = engine.labelAr
+                    } else {
+                        errors.add("${engine.labelAr}: لا توجد نتائج")
+                    }
+                }.onFailure { err ->
+                    errors.add("${engine.labelAr}: ${err.message ?: "تعذر الاتصال"}")
+                }
+
+                // Primary engine succeeded -> stop in single or Auto fallback mode
+                if (collected.isNotEmpty()) break
             }
 
-            val deduped = sources
+            val deduped = collected
                 .filter { it.snippet.isNotBlank() || it.title.isNotBlank() }
                 .distinctBy { it.url.ifBlank { it.title } }
                 .take(requestedCap)
 
+            val totalElapsedMs = (clockMs() - startTimeMs).coerceAtLeast(1L)
+
             val outcome = if (deduped.isEmpty()) {
+                val reason = if (errors.isNotEmpty()) " (${errors.joinToString("؛ ")})" else ""
                 WebSearchOutcome(
                     query = cleanQuery,
-                    summaryText = "ملقتش نتائج واضحة عن «$cleanQuery» في المصادر المتاحة.",
-                    sources = emptyList()
+                    summaryText = "ملقتش نتائج متاحة عن «$cleanQuery»$reason.",
+                    sources = emptyList(),
+                    errorAr = "محرك البحث غير متاح أو مرجعش نتائج حالياً$reason.",
+                    engineUsed = winningEngine.ifBlank { enginesToTry.first().labelAr },
+                    responseTimeMs = totalElapsedMs
                 )
             } else {
                 val top = deduped.first()
@@ -167,7 +228,9 @@ object OnlineSearchManager {
                     query = cleanQuery,
                     summaryText = summary.take(520),
                     sources = deduped,
-                    fromCache = false
+                    fromCache = false,
+                    engineUsed = winningEngine,
+                    responseTimeMs = totalElapsedMs
                 )
             }
 
@@ -178,15 +241,169 @@ object OnlineSearchManager {
             }
             outcome
         } catch (t: Throwable) {
+            val totalElapsedMs = (clockMs() - startTimeMs).coerceAtLeast(0L)
             WebSearchOutcome(
                 query = cleanQuery,
                 summaryText = "",
                 sources = emptyList(),
-                errorAr = "تعذر الاتصال بمصدر البحث (${t.message ?: "network error"})."
+                errorAr = "تعذر الاتصال بمصدر البحث (${t.message ?: "network error"}).",
+                responseTimeMs = totalElapsedMs
             )
         } finally {
             CheetahRuntimeBus.setNetworkSearching(false)
         }
+    }
+
+    suspend fun testSearxngConnection(
+        customSearxngUrl: String,
+        internetSearchEnabled: Boolean,
+        clockMs: () -> Long = { System.currentTimeMillis() },
+        fetcher: (String) -> String = { url -> httpGetHttps(url) }
+    ): SearchEngineTestResult = withContext(Dispatchers.IO) {
+        if (!internetSearchEnabled) {
+            return@withContext SearchEngineTestResult(
+                success = false,
+                messageAr = "فعّل «السماح بالبحث على الإنترنت» أولاً لاختبار الاتصال.",
+                engineUsed = "SearXNG"
+            )
+        }
+        val cleanUrl = customSearxngUrl.trim().trimEnd('/')
+        if (!isValidHttpsUrl(cleanUrl)) {
+            return@withContext SearchEngineTestResult(
+                success = false,
+                messageAr = "الرابط غير صالح: يجب أن يبدأ بـ https:// ويحتوي على نطاق صحيح.",
+                engineUsed = "SearXNG"
+            )
+        }
+        val start = clockMs()
+        return@withContext runCatching {
+            val body = fetcher("$cleanUrl/search?q=cairo&format=json")
+            val root = SimpleJson.parseObject(body)
+                ?: error("الاستجابة ليست JSON صالحاً (تأكد أن تنسيق JSON مفعّل على خادم SearXNG).")
+            val resultsArr = SimpleJson.asArray(root["results"])
+                ?: error("الخادم لم يُرجع حقل results المتوقع.")
+            val elapsed = (clockMs() - start).coerceAtLeast(1L)
+            val hits = parseSearxngJson(body, maxItems = 5)
+            SearchEngineTestResult(
+                success = true,
+                messageAr = "تم الاتصال بخادم SearXNG بنجاح (${resultsArr.size} نتيجة أولية خلال $elapsed مللي ثانية).",
+                resultCount = hits.size.coerceAtLeast(resultsArr.size),
+                responseTimeMs = elapsed,
+                engineUsed = "SearXNG"
+            )
+        }.getOrElse { err ->
+            val elapsed = (clockMs() - start).coerceAtLeast(0L)
+            SearchEngineTestResult(
+                success = false,
+                messageAr = "فشل الاتصال بخادم SearXNG: ${err.message ?: "تعذر الوصول للخادم"}.",
+                responseTimeMs = elapsed,
+                engineUsed = "SearXNG"
+            )
+        }
+    }
+
+    suspend fun testEngineSearch(
+        settings: AssistantSettings,
+        sampleQuery: String = "القاهرة",
+        clockMs: () -> Long = { System.currentTimeMillis() },
+        fetcher: (String) -> String = { url -> httpGetHttps(url) }
+    ): SearchEngineTestResult {
+        if (!settings.internetSearchEnabled) {
+            return SearchEngineTestResult(
+                success = false,
+                messageAr = "البحث مقفول من الإعدادات. فعّل المفتاح أولاً لتجربة البحث."
+            )
+        }
+        val start = clockMs()
+        val outcome = search(
+            query = sampleQuery,
+            internetSearchEnabled = true,
+            customSearxngUrl = settings.customSearxngUrl,
+            maxResults = 5,
+            searchEngineMode = settings.searchEngineMode,
+            autoSearchOrder = settings.autoSearchOrder,
+            bypassCache = true,
+            clockMs = clockMs,
+            fetcher = fetcher
+        )
+        val elapsed = outcome.responseTimeMs.takeIf { it > 0L } ?: (clockMs() - start).coerceAtLeast(1L)
+        return if (outcome.sources.isNotEmpty()) {
+            SearchEngineTestResult(
+                success = true,
+                messageAr = "نجح البحث عبر ${outcome.engineUsed}: ${outcome.sources.size} نتيجة خلال $elapsed مللي ثانية.",
+                resultCount = outcome.sources.size,
+                responseTimeMs = elapsed,
+                engineUsed = outcome.engineUsed
+            )
+        } else {
+            SearchEngineTestResult(
+                success = false,
+                messageAr = outcome.errorAr ?: "لم ترجع نتائج للمعاينة ($elapsed مللي ثانية).",
+                resultCount = 0,
+                responseTimeMs = elapsed,
+                engineUsed = outcome.engineUsed
+            )
+        }
+    }
+
+    fun normalizeOrder(order: List<ConcreteSearchEngine>): List<ConcreteSearchEngine> {
+        val unique = order.distinct().toMutableList()
+        for (e in ConcreteSearchEngine.entries) {
+            if (e !in unique) unique.add(e)
+        }
+        return unique
+    }
+
+    private fun executeEngine(
+        engine: ConcreteSearchEngine,
+        cleanQuery: String,
+        encodedQuery: String,
+        isArabic: Boolean,
+        customSearxngUrl: String,
+        maxItems: Int,
+        fetcher: (String) -> String
+    ): List<WebSearchSource> {
+        return when (engine) {
+            ConcreteSearchEngine.DUCKDUCKGO -> queryDuckDuckGo(encodedQuery, maxItems, fetcher)
+            ConcreteSearchEngine.WIKIPEDIA -> queryWikipediaAutoLang(encodedQuery, isArabic, fetcher)
+            ConcreteSearchEngine.SEARXNG -> {
+                val base = customSearxngUrl.trim().trimEnd('/')
+                val lang = if (isArabic) "ar" else "en"
+                val url = "$base/search?q=$encodedQuery&format=json&language=$lang"
+                parseSearxngJson(fetcher(url), maxItems = maxItems)
+            }
+        }
+    }
+
+    private fun queryDuckDuckGo(
+        encodedQuery: String,
+        maxItems: Int,
+        fetcher: (String) -> String
+    ): List<WebSearchSource> {
+        val out = mutableListOf<WebSearchSource>()
+        val apiUrl = "https://api.duckduckgo.com/?q=$encodedQuery&format=json&no_html=1&skip_disambig=1"
+        runCatching {
+            parseDuckDuckGoJson(fetcher(apiUrl))
+        }.onSuccess { out.addAll(it) }
+
+        if (out.size < minOf(2, maxItems)) {
+            val htmlUrl = "https://html.duckduckgo.com/html/?q=$encodedQuery"
+            runCatching {
+                parseDuckDuckGoHtml(fetcher(htmlUrl), maxItems = maxItems)
+            }.onSuccess { out.addAll(it) }
+        }
+        return out.distinctBy { it.url.ifBlank { it.title } }.take(maxItems)
+    }
+
+    private fun queryWikipediaAutoLang(
+        encodedQuery: String,
+        isArabic: Boolean,
+        fetcher: (String) -> String
+    ): List<WebSearchSource> {
+        val primaryLang = if (isArabic) "ar" else "en"
+        val primary = queryWikipedia(primaryLang, encodedQuery, fetcher)
+        if (primary.isNotEmpty() || !isArabic) return primary
+        return queryWikipedia("en", encodedQuery, fetcher)
     }
 
     private fun queryWikipedia(
@@ -205,13 +422,16 @@ object OnlineSearchManager {
             val title = SimpleJson.asString(item["title"]).trim()
             val snippetHtml = SimpleJson.asString(item["snippet"])
             val cleanSnippet = stripHtmlTags(snippetHtml)
+            var dateHint = ISO_DATE_PREFIX_REGEX.find(SimpleJson.asString(item["timestamp"]))?.groupValues?.getOrNull(1)
             if (title.isNotEmpty()) {
                 val pageUrl = "https://$lang.wikipedia.org/wiki/${URLEncoder.encode(title.replace(' ', '_'), "UTF-8")}"
-                // Try richer REST summary for top hit
                 val fullExtract = if (i == 0) {
                     val restUrl = "https://$lang.wikipedia.org/api/rest_v1/page/summary/${URLEncoder.encode(title.replace(' ', '_'), "UTF-8")}"
                     runCatching {
                         val restObj = SimpleJson.parseObject(fetcher(restUrl))
+                        if (dateHint.isNullOrBlank()) {
+                            dateHint = ISO_DATE_PREFIX_REGEX.find(SimpleJson.asString(restObj?.get("timestamp")))?.groupValues?.getOrNull(1)
+                        }
                         SimpleJson.asString(restObj?.get("extract")).trim()
                     }.getOrDefault("")
                 } else ""
@@ -220,7 +440,10 @@ object OnlineSearchManager {
                         title = title,
                         snippet = fullExtract.ifBlank { cleanSnippet },
                         url = pageUrl,
-                        provider = "Wikipedia ($lang)"
+                        provider = "Wikipedia ($lang)",
+                        sourceDomain = "$lang.wikipedia.org",
+                        publishedDate = dateHint,
+                        engineName = "Wikipedia"
                     )
                 )
             }
@@ -236,12 +459,17 @@ object OnlineSearchManager {
         val heading = SimpleJson.asString(root["Heading"]).trim()
         val abstractUrl = SimpleJson.asString(root["AbstractURL"]).trim()
         if (abstractText.isNotBlank()) {
+            val safeUrl = if (abstractUrl.startsWith("https://", ignoreCase = true)) abstractUrl else "https://duckduckgo.com"
+            val abstractSource = SimpleJson.asString(root["AbstractSource"]).trim()
             out.add(
                 WebSearchSource(
                     title = heading.ifBlank { "DuckDuckGo" },
                     snippet = abstractText,
-                    url = abstractUrl.ifBlank { "https://duckduckgo.com" },
-                    provider = SimpleJson.asString(root["AbstractSource"]).ifBlank { "DuckDuckGo" }
+                    url = safeUrl,
+                    provider = if (abstractSource.isNotBlank()) "DuckDuckGo ($abstractSource)" else "DuckDuckGo",
+                    sourceDomain = extractDomain(safeUrl),
+                    publishedDate = null,
+                    engineName = "DuckDuckGo"
                 )
             )
         }
@@ -252,18 +480,68 @@ object OnlineSearchManager {
                 val text = SimpleJson.asString(obj["Text"]).trim()
                 val firstUrl = SimpleJson.asString(obj["FirstURL"]).trim()
                 if (text.isNotBlank()) {
+                    val safeUrl = if (firstUrl.startsWith("https://", ignoreCase = true)) firstUrl else "https://duckduckgo.com"
                     out.add(
                         WebSearchSource(
                             title = text.substringBefore(" - ").take(64),
                             snippet = text,
-                            url = firstUrl.ifBlank { "https://duckduckgo.com" },
-                            provider = "DuckDuckGo"
+                            url = safeUrl,
+                            provider = "DuckDuckGo",
+                            sourceDomain = extractDomain(safeUrl),
+                            publishedDate = null,
+                            engineName = "DuckDuckGo"
                         )
                     )
                 }
             }
         }
         return out
+    }
+
+    /**
+     * Graceful parser for DuckDuckGo public HTML results endpoint (`html.duckduckgo.com/html/`).
+     * Returns emptyList() safely if page layout changes or markup is malformed.
+     */
+    fun parseDuckDuckGoHtml(html: String, maxItems: Int = 5): List<WebSearchSource> {
+        if (html.isBlank()) return emptyList()
+        val linkMatches = DDG_HTML_LINK_REGEX.findAll(html).toList()
+        if (linkMatches.isEmpty()) return emptyList()
+        val snippetMatches = DDG_HTML_SNIPPET_REGEX.findAll(html).toList()
+
+        val out = mutableListOf<WebSearchSource>()
+        for (i in linkMatches.indices) {
+            if (out.size >= maxItems) break
+            val rawHref = linkMatches[i].groupValues.getOrNull(1).orEmpty().trim()
+            val resolvedUrl = resolveDuckDuckGoHref(rawHref) ?: continue
+            val title = stripHtmlTags(linkMatches[i].groupValues.getOrNull(2).orEmpty())
+            val snippet = stripHtmlTags(snippetMatches.getOrNull(i)?.groupValues?.getOrNull(1).orEmpty())
+            if (title.isBlank() && snippet.isBlank()) continue
+            out.add(
+                WebSearchSource(
+                    title = title.ifBlank { extractDomain(resolvedUrl) },
+                    snippet = snippet.ifBlank { title },
+                    url = resolvedUrl,
+                    provider = "DuckDuckGo",
+                    sourceDomain = extractDomain(resolvedUrl),
+                    publishedDate = null,
+                    engineName = "DuckDuckGo"
+                )
+            )
+        }
+        return out
+    }
+
+    private fun resolveDuckDuckGoHref(rawHref: String): String? {
+        if (rawHref.isBlank()) return null
+        val decodedHref = if (rawHref.contains("uddg=")) {
+            val encodedTarget = rawHref.substringAfter("uddg=").substringBefore('&')
+            runCatching { URLDecoder.decode(encodedTarget, "UTF-8") }.getOrDefault(rawHref)
+        } else if (rawHref.startsWith("//")) {
+            "https:$rawHref"
+        } else {
+            rawHref
+        }
+        return decodedHref.takeIf { isValidHttpsUrl(it) }
     }
 
     fun parseSearxngJson(jsonText: String, maxItems: Int = 8): List<WebSearchSource> {
@@ -275,15 +553,21 @@ object OnlineSearchManager {
             val item = SimpleJson.asObject(results[i]) ?: continue
             val url = SimpleJson.asString(item["url"]).trim()
             if (!url.startsWith("https://", ignoreCase = true)) continue
-            val dateHint = SimpleJson.asString(item["publishedDate"]).trim()
+            val dateRaw = SimpleJson.asString(item["publishedDate"]).trim()
+            val dateHint = ISO_DATE_PREFIX_REGEX.find(dateRaw)?.groupValues?.getOrNull(1)
+                ?: dateRaw.takeIf { it.isNotBlank() }?.take(16)
             val cleanedSnippet = stripHtmlTags(SimpleJson.asString(item["content"]))
-            val withDate = if (dateHint.isNotBlank()) "[$dateHint] $cleanedSnippet" else cleanedSnippet
+            val withDate = if (!dateHint.isNullOrBlank()) "[$dateHint] $cleanedSnippet" else cleanedSnippet
+            val subEngine = SimpleJson.asString(item["engine"]).trim()
             out.add(
                 WebSearchSource(
                     title = SimpleJson.asString(item["title"]).trim(),
                     snippet = withDate.take(700),
                     url = url,
-                    provider = SimpleJson.asString(item["engine"]).ifBlank { "SearXNG" }
+                    provider = if (subEngine.isNotBlank()) "SearXNG ($subEngine)" else "SearXNG",
+                    sourceDomain = extractDomain(url),
+                    publishedDate = dateHint,
+                    engineName = "SearXNG"
                 )
             )
         }
@@ -315,7 +599,7 @@ object OnlineSearchManager {
             readTimeout = READ_TIMEOUT_MS
             instanceFollowRedirects = true
             setRequestProperty("User-Agent", USER_AGENT)
-            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Accept", "application/json,text/html;q=0.8")
         }
         try {
             val code = conn.responseCode

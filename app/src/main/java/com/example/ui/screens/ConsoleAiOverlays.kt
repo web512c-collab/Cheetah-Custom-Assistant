@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CheckCircle
@@ -25,7 +26,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Settings
@@ -58,6 +58,7 @@ import com.example.core.model.InteractionTrace
 import com.example.core.model.LocalLlmRuntimeStatus
 import com.example.core.model.ProposedAction
 import com.example.core.model.SearchConfidence
+import com.example.search.OnlineSearchManager
 import com.example.ui.theme.CheetahAmber
 import com.example.ui.theme.CheetahBorder
 import com.example.ui.theme.CheetahCard
@@ -423,6 +424,14 @@ fun EnrichedTraceLogCard(
                     trace.sources.forEachIndexed { idx, src ->
                         val judgedMeta = trace.judgedSources.firstOrNull { it.source.url == src.url }
                         val numLabel = judgedMeta?.index ?: (idx + 1)
+                        val engineLabel = src.engineName.ifBlank { src.provider }
+                        val domainLabel = src.sourceDomain.ifBlank {
+                            judgedMeta?.domain?.takeIf { it.isNotBlank() } ?: OnlineSearchManager.extractDomain(src.url)
+                        }
+                        val datePart = (src.publishedDate ?: judgedMeta?.publishedDate)
+                            ?.takeIf { it.isNotBlank() }
+                            ?.let { " • $it" }
+                            .orEmpty()
                         val metaBadge = if (judgedMeta != null && trace.generatedByLocalLlm) {
                             " [صلة ${judgedMeta.relevanceScore}/10 • ${judgedMeta.verdict.labelAr}]"
                         } else ""
@@ -442,16 +451,17 @@ fun EnrichedTraceLogCard(
                                     }
                                 }
                                 .padding(vertical = 4.dp)
+                                .testTag("trace_source_item_${numLabel}")
                         ) {
                             Icon(
-                                imageVector = Icons.Default.OpenInNew,
+                                imageVector = Icons.AutoMirrored.Filled.OpenInNew,
                                 contentDescription = "فتح المصدر",
                                 tint = CheetahCyan,
                                 modifier = Modifier.size(14.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "[$numLabel] ${src.provider}: ${src.title}$metaBadge",
+                                text = "[$numLabel] [$engineLabel] ${src.title} ($domainLabel$datePart)$metaBadge",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = CheetahCyan
                             )

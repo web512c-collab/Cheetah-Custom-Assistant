@@ -2,6 +2,18 @@
 
 All notable changes to **Cheetah Custom Assistant** are documented in this file.
 
+## v0.4.1 (2026-11-26)
+
+**Version:** `0.4.1` (`versionCode = 5`, up from `versionCode = 4` in `v0.4.0`)  
+**Signing:** Preserves the exact same `debug.keystore` (`androiddebugkey`) signing configuration so `Cheetah-v0.4.1-debug.apk` installs as an in-place update over `v0.2.0` / `v0.4.0`.
+
+### New Feature — Search Engine Selection (`OnlineSearchManager`, `SettingsLlmAndSearchCards`, `SettingsRepository`)
+- **4-Mode Keyless Search Engine Selector (Persisted in DataStore, Immediate):** Added DuckDuckGo (default: Instant Answer public JSON API + DuckDuckGo HTML public endpoint with graceful layout fallback), Wikipedia (`ar`/`en` automatic language matching + English fallback via MediaWiki/REST APIs), SearXNG (custom HTTPS-validated `/search?format=json` instance with a **"Test connection"** button), and **Auto** (user-editable priority order trying primary -> fallback engines automatically).
+- **Diagnostics, Transparency & Guardrails (`ConsoleAiOverlays`, `V041SearchEnginesUnitTest`):** Every `WebSearchSource` now records domain, date (when available), and `engineName`, displayed clearly in on-screen source cards; added a **"Test search"** button reporting result count and response time (`ms`); preserved HTTPS-only enforcement, timeouts, caching, rate limiting, and zero-PII/query-only transmission when enabled (plus mocked HTTP unit tests).
+
+### Fixed — GitHub Release APK Attachment (`.github/workflows/android-build.yml`)
+- Added `release: types: [published]` and `workflow_dispatch` optional `tag` input triggers alongside `push` to `main` and `v*` tags, unified `release_meta` tag resolution, explicit `Cheetah-<tag>-debug.apk` existence verification, and explicit `tag_name` + `files` attachment on `softprops/action-gh-release@v2` (`prerelease: true`, `permissions: contents: write`) so the APK is always attached to GitHub Releases.
+
 ## v0.4.0 (2026-11-26)
 
 **Version:** `0.4.0` (`versionCode = 4`, up from `versionCode = 2` in `v0.2.0`)  
