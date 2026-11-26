@@ -34,7 +34,8 @@ class ConversationMemoryStore(context: Context) {
         intentCategory: String,
         newAppContext: ActiveAppContext? = null,
         newSearchQuery: String? = null,
-        newOpenedApp: String? = null
+        newOpenedApp: String? = null,
+        newRollingSummary: String? = null
     ) = withContext(Dispatchers.IO) {
         val current = _state.value
         val resolvedAppCtx = newAppContext ?: current.activeAppContext
@@ -50,6 +51,7 @@ class ConversationMemoryStore(context: Context) {
             activeAppContext = resolvedAppCtx,
             lastSearchQuery = newSearchQuery ?: current.lastSearchQuery,
             lastOpenedApp = newOpenedApp ?: current.lastOpenedApp,
+            rollingSummary = newRollingSummary ?: current.rollingSummary,
             recentEntries = (listOf(entry) + current.recentEntries).take(MAX_HISTORY)
         )
         saveToDisk(updated)
@@ -103,6 +105,7 @@ class ConversationMemoryStore(context: Context) {
             val appCtx = runCatching { ActiveAppContext.valueOf(ctxName) }.getOrDefault(ActiveAppContext.NONE)
             val lastSearch = root.optString("lastSearchQuery", "").ifBlank { null }
             val lastApp = root.optString("lastOpenedApp", "").ifBlank { null }
+            val rollingSummary = root.optString("rollingSummary", "")
 
             val entriesJson = root.optJSONArray("entries") ?: JSONArray()
             val entries = buildList {
@@ -142,6 +145,7 @@ class ConversationMemoryStore(context: Context) {
                 activeAppContext = appCtx,
                 lastSearchQuery = lastSearch,
                 lastOpenedApp = lastApp,
+                rollingSummary = rollingSummary,
                 recentEntries = entries,
                 shortcuts = shortcuts
             )
@@ -176,6 +180,7 @@ class ConversationMemoryStore(context: Context) {
             put("activeAppContext", state.activeAppContext.name)
             put("lastSearchQuery", state.lastSearchQuery.orEmpty())
             put("lastOpenedApp", state.lastOpenedApp.orEmpty())
+            put("rollingSummary", state.rollingSummary)
             put("entries", entriesArr)
             put("shortcuts", shortcutsArr)
         }

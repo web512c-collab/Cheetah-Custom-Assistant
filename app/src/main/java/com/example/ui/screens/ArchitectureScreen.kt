@@ -35,6 +35,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.core.model.LocalLlmLoadState
+import com.example.core.model.LocalLlmRuntimeStatus
 import com.example.ui.theme.CheetahAmber
 import com.example.ui.theme.CheetahBorder
 import com.example.ui.theme.CheetahCard
@@ -51,7 +53,9 @@ import com.example.voice.TtsStatus
 fun ArchitectureScreen(
     offlineSttStatus: OfflineSttStatus,
     ttsStatus: TtsStatus,
-    enrolledTemplatesCount: Int
+    enrolledTemplatesCount: Int,
+    internetSearchEnabled: Boolean = false,
+    localLlmStatus: LocalLlmRuntimeStatus = LocalLlmRuntimeStatus()
 ) {
     Box(
         modifier = Modifier
@@ -91,8 +95,19 @@ fun ArchitectureScreen(
                     icon = Icons.Default.Security,
                     accent = CheetahEmerald
                 ) {
-                    DiagnosticRow("صلاحية INTERNET في التطبيق", "غير موجودة (0 اتصالات خارجية)", CheetahEmerald)
-                    DiagnosticRow("Gemini / Cloud LLM SDKs", "معطّلة ومحذوفة تماماً", CheetahEmerald)
+                    DiagnosticRow(
+                        "البحث على الإنترنت (بدون مفاتيح)",
+                        if (internetSearchEnabled) "مفعّل (نص السؤال فقط عبر HTTPS)" else "مقفول (أوفلاين 100%)",
+                        if (internetSearchEnabled) CheetahCyan else CheetahEmerald
+                    )
+                    DiagnosticRow(
+                        "محرك الذكاء المحلي (llama.cpp GGUF)",
+                        when (localLlmStatus.loadState) {
+                            LocalLlmLoadState.LOADED -> "محمّل (${localLlmStatus.metadata?.displayName ?: "GGUF"})"
+                            else -> "اختياري غير محمّل (لا توجد نماذج مدمجة)"
+                        },
+                        if (localLlmStatus.loadState == LocalLlmLoadState.LOADED) CheetahEmerald else CheetahCyan
+                    )
                     DiagnosticRow(
                         "التعرف المحلي على الكلام (STT)",
                         offlineSttStatus.engineModeLabelAr,

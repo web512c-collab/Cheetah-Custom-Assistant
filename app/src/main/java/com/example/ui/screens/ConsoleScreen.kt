@@ -71,10 +71,22 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.ui.platform.LocalContext
 import com.example.core.model.AssistantPipelineState
 import com.example.core.model.AssistantSettings
 import com.example.core.model.InteractionTrace
+import com.example.core.model.LocalLlmLoadState
+import com.example.core.model.LocalLlmRuntimeStatus
 import com.example.core.model.PermissionHealthState
+import com.example.core.model.ProposedAction
 import com.example.ui.theme.CheetahAmber
 import com.example.ui.theme.CheetahBorder
 import com.example.ui.theme.CheetahCard
@@ -105,15 +117,31 @@ fun ConsoleScreen(
     liveMicLevel: Float,
     pipelineState: AssistantPipelineState,
     partialTranscript: String,
+    streamingReplyText: String,
+    isNetworkSearching: Boolean,
+    localLlmStatus: LocalLlmRuntimeStatus,
     traces: List<InteractionTrace>,
+    incomingSharedText: String? = null,
+    pendingContinuationText: String? = null,
+    pendingProposedAction: ProposedAction? = null,
     onStartVoiceCommand: () -> Unit,
     onSubmitTextCommand: (String) -> Unit,
+    onSubmitTextWithAttachment: (String, String?) -> Unit = { cmd, _ -> onSubmitTextCommand(cmd) },
+    onConsumeSharedText: () -> Unit = {},
+    onReadClipboard: () -> String? = { null },
+    onConfirmProposedAction: (ProposedAction) -> Unit = {},
+    onDismissProposedAction: () -> Unit = {},
+    onContinueSpeech: () -> Unit = {},
     onToggleContinuousListening: (Boolean) -> Unit,
     onToggleMute: () -> Unit,
     onRequestMicPermission: () -> Unit,
+    onCancelLlmGeneration: () -> Unit,
     onOpenSettingsTab: () -> Unit
 ) {
     var commandInput by remember { mutableStateOf("") }
+    var clipboardAttachedText by remember { mutableStateOf<String?>(null) }
+    val activeAttachedText = incomingSharedText ?: clipboardAttachedText
+    val attachedLabel = if (incomingSharedText != null) "نص مشارك مع شيتا" else "نص من الحافظة (بطلبك)"
 
     Box(
         modifier = Modifier
@@ -141,12 +169,17 @@ fun ConsoleScreen(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "شيتا — القيادة المحلية",
+                            text = "${settings.assistantName} — القيادة المحلية",
                             style = MaterialTheme.typography.headlineMedium,
                             color = CheetahTextPrimary
                         )
+                        val modeSubtitle = buildString {
+                            append("ZERO-API-KEY • ar-EG")
+                            if (localLlmStatus.loadState == LocalLlmLoadState.LOADED) append(" • GGUF")
+                            if (settings.internetSearchEnabled) append(" • HTTPS Search")
+                        }
                         Text(
-                            text = "ZERO-API-KEY • EGYPTIAN COLLOQUIAL (ar-EG)",
+                            text = modeSubtitle,
                             style = MaterialTheme.typography.labelSmall,
                             color = CheetahCyan
                         )
@@ -317,6 +350,27 @@ fun ConsoleScreen(
                             )
                         }
 
+                        AnimatedVisibility(visible = isNetworkSearching) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(top = 8.dp)
+                            ) {
+                                Icon(Icons.Default.Public, contentDescription = null, tint = CheetahEmerald, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "جاري البحث على الإنترنت بدون مفاتيح API...",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = CheetahEmerald
+                                )
+                            }
+                        }
+
+                        ThinkingIndicatorBanner(
+                            llmStatus = localLlmStatus,
+                            streamingReplyText = streamingReplyText,
+                            onCancelGeneration = onCancelLlmGeneration
+                        )
+
                         Spacer(modifier = Modifier.height(14.dp))
 
                         Row(
@@ -374,6 +428,35 @@ fun ConsoleScreen(
                 }
             }
 
+            if (!activeAttachedText.isNullOrBlank()) {
+                item {
+                    AttachedTextActionBanner(
+                        attachedText = activeAttachedText,
+                        sourceLabel = attachedLabel,
+                        onRunTaskOnAttached = { prompt ->
+                            val textToProcess = activeAttachedText
+                            clipboardAttachedText = null
+                            onConsumeSharedText()
+                            onSubmitTextWithAttachment(prompt, textToProcess)
+                        },
+                        onDismiss = {
+                            clipboardAttachedText = null
+                            onConsumeSharedText()
+                        }
+                    )
+                }
+            }
+
+            if (pendingProposedAction != null) {
+                item {
+                    ProposedActionConfirmCard(
+                        action = pendingProposedAction,
+                        onConfirm = onConfirmProposedAction,
+                        onDismiss = onDismissProposedAction
+                    )
+                }
+            }
+
             item {
                 // Direct Egyptian Text Command Input + Quick Command Chips
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -386,7 +469,7 @@ fun ConsoleScreen(
                             onValueChange = { commandInput = it },
                             placeholder = {
                                 Text(
-                                    text = "اكتب أمر بالعامية المصرية (مثلاً: افتح يوتيوب وشغل...)",
+                                    text = "اكتب أمر أو سؤال بالمصري (أو لخص/اشرح/ترجم)...",
                                     style = MaterialTheme.typography.bodySmall
                                 )
                             },
@@ -402,13 +485,37 @@ fun ConsoleScreen(
                                 .weight(1f)
                                 .testTag("console_command_input")
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        FilledTonalIconButton(
+                            onClick = {
+                                val clip = onReadClipboard()
+                                if (!clip.isNullOrBlank()) {
+                                    clipboardAttachedText = clip
+                                } else {
+                                    onSubmitTextCommand("اقرا الحافظة")
+                                }
+                            },
+                            colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = CheetahCard),
+                            modifier = Modifier
+                                .size(50.dp)
+                                .testTag("console_paste_clipboard_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ContentPaste,
+                                contentDescription = "لصق نص من الحافظة",
+                                tint = CheetahCyan
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
                         Button(
                             onClick = {
                                 if (commandInput.isNotBlank()) {
                                     val cmd = commandInput
                                     commandInput = ""
-                                    onSubmitTextCommand(cmd)
+                                    val attached = activeAttachedText
+                                    clipboardAttachedText = null
+                                    if (incomingSharedText != null) onConsumeSharedText()
+                                    onSubmitTextWithAttachment(cmd, attached)
                                 }
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = CheetahAmber),
@@ -500,7 +607,15 @@ fun ConsoleScreen(
                 }
             } else {
                 items(traces, key = { it.id }) { trace ->
-                    TraceLogCard(trace)
+                    EnrichedTraceLogCard(
+                        trace = trace,
+                        assistantName = settings.assistantName,
+                        showReasoning = settings.localLlmConfig.showReasoning,
+                        showSources = settings.localLlmConfig.showSources,
+                        hasPendingContinuation = !pendingContinuationText.isNullOrBlank(),
+                        onContinueSpeech = onContinueSpeech,
+                        onOpenModelSettings = onOpenSettingsTab
+                    )
                 }
             }
         }
@@ -583,70 +698,6 @@ private fun ArcCoreOrb(
                     contentDescription = "تفعيل الاستماع",
                     tint = coreColor,
                     modifier = Modifier.size(32.dp)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun TraceLogCard(trace: InteractionTrace) {
-    val accent = if (trace.isBlocked) CheetahCrimson else CheetahEmerald
-    Card(
-        colors = CardDefaults.cardColors(containerColor = CheetahCard),
-        shape = RoundedCornerShape(18.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, accent.copy(alpha = 0.45f))
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = if (trace.isBlocked) Icons.Default.Block else Icons.Default.CheckCircle,
-                        contentDescription = null,
-                        tint = accent,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "${trace.intentLabel} • ${trace.guardrailStatus}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = accent
-                    )
-                }
-                Text(
-                    text = trace.timestampFormatted,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = CheetahTextSecondary
-                )
-            }
-
-            Text(
-                text = "أنت: «${trace.rawUtterance}»",
-                style = MaterialTheme.typography.bodyMedium,
-                color = CheetahTextPrimary,
-                fontWeight = FontWeight.Bold
-            )
-
-            Text(
-                text = "شيتا: ${trace.assistantReplyAr}",
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (trace.isBlocked) CheetahCrimson else CheetahCyan
-            )
-
-            if (trace.normalizedPhonetics.isNotBlank()) {
-                Text(
-                    text = "Phonetic Key: ${trace.normalizedPhonetics}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = CheetahTextSecondary
                 )
             }
         }

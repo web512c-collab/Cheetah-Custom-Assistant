@@ -44,35 +44,39 @@ class WakeWordEnrollmentRecorder(private val context: Context) {
             AudioFormat.ENCODING_PCM_16BIT
         ).coerceAtLeast(2048)
 
-        val audioRecord = createBestAudioRecord(sampleRate, minBuf)
-            ?: return@withContext EnrollmentCaptureResult.Error(
-                "المايكروفون غير متاح أو مستخدم حالياً في تطبيق تاني."
-            )
-
         val captured = ShortArray(totalSamples)
         var readTotal = 0
         var peakRms = 0f
 
-        try {
-            audioRecord.startRecording()
-            val chunk = ShortArray(512)
-            while (readTotal < totalSamples) {
-                val read = audioRecord.read(
-                    chunk,
-                    0,
-                    minOf(chunk.size, totalSamples - readTotal)
-                )
-                if (read <= 0) break
-                System.arraycopy(chunk, 0, captured, readTotal, read)
-                readTotal += read
-                val rms = AudioFeatureExtractor.computeRms(chunk, read)
-                if (rms > peakRms) peakRms = rms
-                onAmplitude((rms * 4.5f).coerceIn(0f, 1f))
+        val captureOk = MicrophoneArbitrator.withMicAccess(MicOwner.UI_ENROLLMENT) {
+            val audioRecord = createBestAudioRecord(sampleRate, minBuf) ?: return@withMicAccess false
+            try {
+                audioRecord.startRecording()
+                val chunk = ShortArray(512)
+                while (readTotal < totalSamples) {
+                    val read = audioRecord.read(
+                        chunk,
+                        0,
+                        minOf(chunk.size, totalSamples - readTotal)
+                    )
+                    if (read <= 0) break
+                    System.arraycopy(chunk, 0, captured, readTotal, read)
+                    readTotal += read
+                    val rms = AudioFeatureExtractor.computeRms(chunk, read)
+                    if (rms > peakRms) peakRms = rms
+                    onAmplitude((rms * 4.5f).coerceIn(0f, 1f))
+                }
+                true
+            } finally {
+                runCatching { audioRecord.stop() }
+                audioRecord.release()
+                onAmplitude(0f)
             }
-        } finally {
-            runCatching { audioRecord.stop() }
-            audioRecord.release()
-            onAmplitude(0f)
+        }
+        if (!captureOk) {
+            return@withContext EnrollmentCaptureResult.Error(
+                "المايكروفون غير متاح أو مستخدم حالياً في تطبيق تاني."
+            )
         }
 
         val trimmed = captured.copyOf(readTotal)

@@ -41,32 +41,57 @@ object DeviceActionExecutor {
         context: Context,
         intent: EgyptianIntent,
         tone: PersonaTone,
-        memoryState: ConversationContextState = ConversationContextState()
+        memoryState: ConversationContextState = ConversationContextState(),
+        assistantName: String = "شيتا",
+        assistantGender: com.example.core.model.AssistantGender = com.example.core.model.AssistantGender.MALE
     ): ActionExecutionResult {
         return when (intent) {
-            is EgyptianIntent.OpenApp -> executeOpenApp(context, intent, tone)
-            is EgyptianIntent.CloseCurrentApp -> executeCloseCurrentApp(intent, tone)
-            is EgyptianIntent.YouTubeSearchPlay -> executeYouTube(context, intent, tone)
-            is EgyptianIntent.WebSearch -> executeWebSearch(context, intent, tone)
-            is EgyptianIntent.MediaControl -> executeMediaControl(context, intent, tone)
-            is EgyptianIntent.DeviceSettingPanel -> executeSettingPanel(context, intent, tone)
-            is EgyptianIntent.SetAlarmOrTimer -> executeAlarmOrTimer(context, intent, tone)
-            is EgyptianIntent.CallOrMessageIntent -> executeCommIntent(context, intent, tone)
-            is EgyptianIntent.SystemStatusBriefing -> executeSystemBriefing(context, tone)
-            is EgyptianIntent.RecallConversationContext -> executeMemoryRecall(memoryState, tone)
-            is EgyptianIntent.CompoundCommands -> executeCompound(context, intent, tone, memoryState)
-            is EgyptianIntent.AccessibilityUiAction -> executeAccessibility(intent, tone)
+            is EgyptianIntent.OpenApp -> executeOpenApp(context, intent, tone, assistantName, assistantGender)
+            is EgyptianIntent.CloseCurrentApp -> executeCloseCurrentApp(intent, tone, assistantName, assistantGender)
+            is EgyptianIntent.YouTubeSearchPlay -> executeYouTube(context, intent, tone, assistantName, assistantGender)
+            is EgyptianIntent.WebSearch -> executeWebSearch(context, intent, tone, assistantName, assistantGender)
+            is EgyptianIntent.KnowledgeOrChatQuery -> ActionExecutionResult(
+                succeeded = true,
+                replyAr = JarvisEgyptianResponder.formatSuccessReply(
+                    intent = intent,
+                    tone = tone,
+                    assistantName = assistantName,
+                    gender = assistantGender
+                )
+            )
+            is EgyptianIntent.MediaControl -> executeMediaControl(context, intent, tone, assistantName, assistantGender)
+            is EgyptianIntent.DeviceSettingPanel -> executeSettingPanel(context, intent, tone, assistantName, assistantGender)
+            is EgyptianIntent.SetAlarmOrTimer -> executeAlarmOrTimer(context, intent, tone, assistantName, assistantGender)
+            is EgyptianIntent.CallOrMessageIntent -> executeCommIntent(context, intent, tone, assistantName, assistantGender)
+            is EgyptianIntent.SystemStatusBriefing -> executeSystemBriefing(context, tone, assistantGender)
+            is EgyptianIntent.RecallConversationContext -> executeMemoryRecall(memoryState, tone, assistantGender)
+            is EgyptianIntent.CompoundCommands -> executeCompound(context, intent, tone, memoryState, assistantName, assistantGender)
+            is EgyptianIntent.AccessibilityUiAction -> executeAccessibility(intent, tone, assistantName, assistantGender)
             is EgyptianIntent.SmallTalkOrPersona -> ActionExecutionResult(
                 succeeded = true,
-                replyAr = JarvisEgyptianResponder.formatSuccessReply(intent, tone)
+                replyAr = JarvisEgyptianResponder.formatSuccessReply(
+                    intent = intent,
+                    tone = tone,
+                    assistantName = assistantName,
+                    gender = assistantGender
+                )
             )
             is EgyptianIntent.BlockedOrUnsafe -> ActionExecutionResult(
                 succeeded = false,
-                replyAr = JarvisEgyptianResponder.formatGuardrailBlockReply(intent.reasonAr, tone)
+                replyAr = JarvisEgyptianResponder.formatGuardrailBlockReply(
+                    reasonAr = intent.reasonAr,
+                    tone = tone,
+                    gender = assistantGender
+                )
             )
             is EgyptianIntent.Unknown -> ActionExecutionResult(
                 succeeded = false,
-                replyAr = JarvisEgyptianResponder.formatSuccessReply(intent, tone)
+                replyAr = JarvisEgyptianResponder.formatSuccessReply(
+                    intent = intent,
+                    tone = tone,
+                    assistantName = assistantName,
+                    gender = assistantGender
+                )
             )
         }
     }
@@ -74,7 +99,9 @@ object DeviceActionExecutor {
     private fun executeOpenApp(
         context: Context,
         intent: EgyptianIntent.OpenApp,
-        tone: PersonaTone
+        tone: PersonaTone,
+        assistantName: String,
+        assistantGender: com.example.core.model.AssistantGender
     ): ActionExecutionResult {
         val (pkg, launchIntent) = PackageResolver.resolveLaunchIntent(context, intent.appQuery)
         if (launchIntent == null) {
@@ -96,8 +123,10 @@ object DeviceActionExecutor {
             ActionExecutionResult(
                 succeeded = true,
                 replyAr = JarvisEgyptianResponder.formatSuccessReply(
-                    intent.copy(resolvedPackage = pkg),
-                    tone
+                    intent = intent.copy(resolvedPackage = pkg),
+                    tone = tone,
+                    assistantName = assistantName,
+                    gender = assistantGender
                 ),
                 newAppContext = appCtx,
                 newOpenedApp = intent.appQuery
@@ -112,7 +141,9 @@ object DeviceActionExecutor {
 
     private fun executeCloseCurrentApp(
         intent: EgyptianIntent.CloseCurrentApp,
-        tone: PersonaTone
+        tone: PersonaTone,
+        assistantName: String,
+        assistantGender: com.example.core.model.AssistantGender
     ): ActionExecutionResult {
         val service = CheetahAccessibilityService.activeInstance
             ?: return ActionExecutionResult(
@@ -123,7 +154,12 @@ object DeviceActionExecutor {
         return if (ok) {
             ActionExecutionResult(
                 succeeded = true,
-                replyAr = JarvisEgyptianResponder.formatSuccessReply(intent, tone),
+                replyAr = JarvisEgyptianResponder.formatSuccessReply(
+                    intent = intent,
+                    tone = tone,
+                    assistantName = assistantName,
+                    gender = assistantGender
+                ),
                 newAppContext = ActiveAppContext.NONE
             )
         } else {
@@ -137,7 +173,9 @@ object DeviceActionExecutor {
     private fun executeYouTube(
         context: Context,
         intent: EgyptianIntent.YouTubeSearchPlay,
-        tone: PersonaTone
+        tone: PersonaTone,
+        assistantName: String,
+        assistantGender: com.example.core.model.AssistantGender
     ): ActionExecutionResult {
         val ytSearchIntent = Intent(Intent.ACTION_SEARCH).apply {
             setPackage("com.google.android.youtube")
@@ -167,7 +205,12 @@ object DeviceActionExecutor {
         }
         return ActionExecutionResult(
             succeeded = true,
-            replyAr = JarvisEgyptianResponder.formatSuccessReply(intent, tone),
+            replyAr = JarvisEgyptianResponder.formatSuccessReply(
+                intent = intent,
+                tone = tone,
+                assistantName = assistantName,
+                gender = assistantGender
+            ),
             newAppContext = ActiveAppContext.YOUTUBE,
             newSearchQuery = intent.query,
             newOpenedApp = "يوتيوب"
@@ -177,7 +220,9 @@ object DeviceActionExecutor {
     private fun executeWebSearch(
         context: Context,
         intent: EgyptianIntent.WebSearch,
-        tone: PersonaTone
+        tone: PersonaTone,
+        assistantName: String,
+        assistantGender: com.example.core.model.AssistantGender
     ): ActionExecutionResult {
         val webSearch = Intent(Intent.ACTION_WEB_SEARCH).apply {
             putExtra(SearchManager.QUERY, intent.query)
@@ -206,7 +251,12 @@ object DeviceActionExecutor {
         }
         return ActionExecutionResult(
             succeeded = true,
-            replyAr = JarvisEgyptianResponder.formatSuccessReply(intent, tone),
+            replyAr = JarvisEgyptianResponder.formatSuccessReply(
+                intent = intent,
+                tone = tone,
+                assistantName = assistantName,
+                gender = assistantGender
+            ),
             newAppContext = ActiveAppContext.BROWSER,
             newSearchQuery = intent.query
         )
@@ -215,7 +265,9 @@ object DeviceActionExecutor {
     private fun executeMediaControl(
         context: Context,
         intent: EgyptianIntent.MediaControl,
-        tone: PersonaTone
+        tone: PersonaTone,
+        assistantName: String,
+        assistantGender: com.example.core.model.AssistantGender
     ): ActionExecutionResult {
         val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
             ?: return ActionExecutionResult(false, "خدمة الصوت غير متاحة.")
@@ -256,7 +308,12 @@ object DeviceActionExecutor {
 
         return ActionExecutionResult(
             succeeded = true,
-            replyAr = JarvisEgyptianResponder.formatSuccessReply(intent, tone)
+            replyAr = JarvisEgyptianResponder.formatSuccessReply(
+                intent = intent,
+                tone = tone,
+                assistantName = assistantName,
+                gender = assistantGender
+            )
         )
     }
 
@@ -269,7 +326,9 @@ object DeviceActionExecutor {
     private fun executeSettingPanel(
         context: Context,
         intent: EgyptianIntent.DeviceSettingPanel,
-        tone: PersonaTone
+        tone: PersonaTone,
+        assistantName: String,
+        assistantGender: com.example.core.model.AssistantGender
     ): ActionExecutionResult {
         val panelIntent = when (intent.target) {
             SettingPanelTarget.WIFI -> {
@@ -288,7 +347,12 @@ object DeviceActionExecutor {
             context.startActivity(panelIntent)
             ActionExecutionResult(
                 succeeded = true,
-                replyAr = JarvisEgyptianResponder.formatSuccessReply(intent, tone),
+                replyAr = JarvisEgyptianResponder.formatSuccessReply(
+                    intent = intent,
+                    tone = tone,
+                    assistantName = assistantName,
+                    gender = assistantGender
+                ),
                 newAppContext = ActiveAppContext.SETTINGS
             )
         }.getOrElse {
@@ -299,19 +363,21 @@ object DeviceActionExecutor {
     private fun executeAlarmOrTimer(
         context: Context,
         intent: EgyptianIntent.SetAlarmOrTimer,
-        tone: PersonaTone
+        tone: PersonaTone,
+        assistantName: String,
+        assistantGender: com.example.core.model.AssistantGender
     ): ActionExecutionResult {
         val clockIntent = if (intent.timerMinutes != null) {
             Intent(AlarmClock.ACTION_SET_TIMER).apply {
                 putExtra(AlarmClock.EXTRA_LENGTH, intent.timerMinutes * 60)
-                putExtra(AlarmClock.EXTRA_MESSAGE, intent.label ?: "تايمر شيتا")
+                putExtra(AlarmClock.EXTRA_MESSAGE, intent.label ?: "تايمر $assistantName")
                 putExtra(AlarmClock.EXTRA_SKIP_UI, false)
             }
         } else {
             Intent(AlarmClock.ACTION_SET_ALARM).apply {
                 putExtra(AlarmClock.EXTRA_HOUR, intent.hour ?: 8)
                 putExtra(AlarmClock.EXTRA_MINUTES, intent.minute ?: 0)
-                putExtra(AlarmClock.EXTRA_MESSAGE, intent.label ?: "منبه شيتا")
+                putExtra(AlarmClock.EXTRA_MESSAGE, intent.label ?: "منبه $assistantName")
                 putExtra(AlarmClock.EXTRA_SKIP_UI, false)
             }
         }.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -320,7 +386,12 @@ object DeviceActionExecutor {
             context.startActivity(clockIntent)
             ActionExecutionResult(
                 succeeded = true,
-                replyAr = JarvisEgyptianResponder.formatSuccessReply(intent, tone)
+                replyAr = JarvisEgyptianResponder.formatSuccessReply(
+                    intent = intent,
+                    tone = tone,
+                    assistantName = assistantName,
+                    gender = assistantGender
+                )
             )
         }.getOrElse {
             ActionExecutionResult(false, "تطبيق الساعة مش متاح لضبط المنبه أو التايمر.")
@@ -330,7 +401,9 @@ object DeviceActionExecutor {
     private fun executeCommIntent(
         context: Context,
         intent: EgyptianIntent.CallOrMessageIntent,
-        tone: PersonaTone
+        tone: PersonaTone,
+        assistantName: String,
+        assistantGender: com.example.core.model.AssistantGender
     ): ActionExecutionResult {
         val commIntent = if (intent.mode == CommMode.CALL) {
             val digits = intent.contactQuery.filter { it.isDigit() || it == '+' }
@@ -348,7 +421,12 @@ object DeviceActionExecutor {
             context.startActivity(commIntent)
             ActionExecutionResult(
                 succeeded = true,
-                replyAr = JarvisEgyptianResponder.formatSuccessReply(intent, tone)
+                replyAr = JarvisEgyptianResponder.formatSuccessReply(
+                    intent = intent,
+                    tone = tone,
+                    assistantName = assistantName,
+                    gender = assistantGender
+                )
             )
         }.getOrElse {
             ActionExecutionResult(false, "تعذر فتح تطبيق الاتصال أو الرسائل.")
@@ -357,28 +435,33 @@ object DeviceActionExecutor {
 
     private fun executeSystemBriefing(
         context: Context,
-        tone: PersonaTone
+        tone: PersonaTone,
+        assistantGender: com.example.core.model.AssistantGender
     ): ActionExecutionResult {
         val timeStr = SimpleDateFormat("hh:mm a", Locale.forLanguageTag("ar-EG")).format(Date())
         val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
         val batteryPct = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
         val batteryText = if (batteryPct in 0..100) "والبطارية $batteryPct%" else ""
+        val working = if (assistantGender == com.example.core.model.AssistantGender.FEMALE) "شغالة" else "شغال"
+        val ready = if (assistantGender == com.example.core.model.AssistantGender.FEMALE) "جاهزة" else "جاهز"
 
         val reply = when (tone) {
             PersonaTone.JARVIS_FORMAL_EGYPTIAN ->
-                "الساعة دلوقتي $timeStr $batteryText يا فندم، وكل الأنظمة المحلية شغالة أوفلاين بكفاءة."
+                "الساعة دلوقتي $timeStr $batteryText يا فندم، وكل الأنظمة المحلية $working أوفلاين بكفاءة."
             PersonaTone.FRIENDLY_EGYPTIAN ->
-                "الساعة دلوقتي $timeStr $batteryText، وكله تمام وزي الفل!"
+                "الساعة دلوقتي $timeStr $batteryText، وكله تمام وزي الفل وأنا $ready!"
             PersonaTone.CONCISE_TACTICAL ->
-                "$timeStr | بطارية $batteryPct% | أوفلاين جاهز."
+                "$timeStr | بطارية $batteryPct% | أوفلاين $ready."
         }
         return ActionExecutionResult(succeeded = true, replyAr = reply)
     }
 
     private fun executeMemoryRecall(
         memoryState: ConversationContextState,
-        tone: PersonaTone
+        tone: PersonaTone,
+        assistantGender: com.example.core.model.AssistantGender
     ): ActionExecutionResult {
+        val rememberWord = if (assistantGender == com.example.core.model.AssistantGender.FEMALE) "فاكرة" else "فاكر"
         val last = memoryState.recentEntries.firstOrNull {
             it.intentCategory != "MEMORY_RECALL"
         }
@@ -396,7 +479,7 @@ object DeviceActionExecutor {
                 ActiveAppContext.SETTINGS -> " (وآخر سياق كان الإعدادات)"
                 ActiveAppContext.NONE -> ""
             }
-            "آخر حاجة طلبتها كانت «${last.userText}»$contextHint يا فندم."
+            "أنا $rememberWord إن آخر حاجة طلبتها كانت «${last.userText}»$contextHint يا فندم."
         }
         return ActionExecutionResult(succeeded = true, replyAr = reply)
     }
@@ -405,7 +488,9 @@ object DeviceActionExecutor {
         context: Context,
         intent: EgyptianIntent.CompoundCommands,
         tone: PersonaTone,
-        memoryState: ConversationContextState
+        memoryState: ConversationContextState,
+        assistantName: String,
+        assistantGender: com.example.core.model.AssistantGender
     ): ActionExecutionResult {
         var currentCtx: ActiveAppContext? = null
         var currentSearch: String? = null
@@ -414,7 +499,7 @@ object DeviceActionExecutor {
         var allSucceeded = true
 
         for (step in intent.steps) {
-            val res = execute(context, step, tone, memoryState)
+            val res = execute(context, step, tone, memoryState, assistantName, assistantGender)
             if (!res.succeeded) allSucceeded = false
             replies.add(res.replyAr)
             res.newAppContext?.let { currentCtx = it }
@@ -432,7 +517,9 @@ object DeviceActionExecutor {
 
     private fun executeAccessibility(
         intent: EgyptianIntent.AccessibilityUiAction,
-        tone: PersonaTone
+        tone: PersonaTone,
+        assistantName: String,
+        assistantGender: com.example.core.model.AssistantGender
     ): ActionExecutionResult {
         val service = CheetahAccessibilityService.activeInstance
             ?: return ActionExecutionResult(
@@ -451,7 +538,12 @@ object DeviceActionExecutor {
         return if (ok) {
             ActionExecutionResult(
                 succeeded = true,
-                replyAr = JarvisEgyptianResponder.formatSuccessReply(intent, tone)
+                replyAr = JarvisEgyptianResponder.formatSuccessReply(
+                    intent = intent,
+                    tone = tone,
+                    assistantName = assistantName,
+                    gender = assistantGender
+                )
             )
         } else {
             ActionExecutionResult(

@@ -2,8 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Zero-API-Key Architecture: No INTERNET permission declared by Cheetah itself.
-         Web/YouTube searches delegate strictly to user-installed Browser/YouTube via Intents. -->
+    <!-- Optional Keyless HTTPS Search (Part D): OFF by default in Settings.
+         Zero API keys; when enabled, transmits ONLY the user's explicit search query text. -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
@@ -64,6 +65,11 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
 
@@ -148,6 +154,14 @@
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".voice.WakeWatchdogReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.example.voice.action.WATCHDOG_CHECK" />
             </intent-filter>
         </receiver>
 

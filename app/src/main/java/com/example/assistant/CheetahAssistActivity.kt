@@ -50,14 +50,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.example.controller.DeviceActionExecutor
-import com.example.controller.PermissionHealthChecker
-import com.example.core.model.GuardrailVerdict
 import com.example.data.ConversationMemoryStore
 import com.example.data.SettingsRepository
-import com.example.guardrails.CommandGuardrailValidator
-import com.example.intelligence.EgyptianColloquialNluParser
-import com.example.intelligence.JarvisEgyptianResponder
+import com.example.intelligence.AssistantCommandProcessor
+import com.example.llm.LocalLlmManager
 import com.example.ui.theme.CheetahAmber
 import com.example.ui.theme.CheetahAssistantTheme
 import com.example.ui.theme.CheetahCrimson
@@ -65,12 +61,14 @@ import com.example.ui.theme.CheetahCyan
 import com.example.ui.theme.CheetahSlate
 import com.example.voice.EgyptianOfflineSttManager
 import com.example.voice.EgyptianTtsManager
+import com.example.voice.MicOwner
+import com.example.voice.MicrophoneArbitrator
 import com.example.voice.WakeWordDetectionService
 import kotlinx.coroutines.launch
 
 /**
  * Handles ACTION_ASSIST and ACTION_VOICE_COMMAND system assistant entry points.
- * Shares persistent ConversationMemoryStore and offline STT/TTS engines.
+ * Uses unified AssistantCommandProcessor, MicrophoneArbitrator, and voice/gender prefs.
  */
 class CheetahAssistActivity : ComponentActivity() {
 
@@ -78,6 +76,7 @@ class CheetahAssistActivity : ComponentActivity() {
     private lateinit var ttsManager: EgyptianTtsManager
     private lateinit var settingsRepo: SettingsRepository
     private lateinit var memoryStore: ConversationMemoryStore
+    private lateinit var commandProcessor: AssistantCommandProcessor
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -86,6 +85,8 @@ class CheetahAssistActivity : ComponentActivity() {
         ttsManager = EgyptianTtsManager(this)
         settingsRepo = SettingsRepository(this)
         memoryStore = ConversationMemoryStore(this)
+        val localLlmManager = LocalLlmManager(applicationContext, settingsRepo)
+        commandProcessor = AssistantCommandProcessor(applicationContext, memoryStore, localLlmManager)
 
         val fromWakeWord = intent.getBooleanExtra(WakeWordDetectionService.EXTRA_FROM_WAKE_WORD, false)
         val voiceMatchScore = if (intent.hasExtra(WakeWordDetectionService.EXTRA_VOICE_MATCH_SCORE)) {
@@ -101,8 +102,7 @@ class CheetahAssistActivity : ComponentActivity() {
                     sttManager = sttManager,
                     ttsManager = ttsManager,
                     settingsRepo = settingsRepo,
-                    memoryStore = memoryStore,
-                    activity = this
+                    commandProcessor = commandProcessor
                 )
             }
         }
@@ -123,10 +123,10 @@ private fun AssistOverlaySheet(
     sttManager: EgyptianOfflineSttManager,
     ttsManager: EgyptianTtsManager,
     settingsRepo: SettingsRepository,
-    memoryStore: ConversationMemoryStore,
-    activity: ComponentActivity
+    commandProcessor: AssistantCommandProcessor
 ) {
     val scope = rememberCoroutineScope()
+    var assistantTitle by remember { mutableStateOf("شيتا — المساعد الشخصي") }
     var statusText by remember {
         mutableStateOf(
             if (fromWakeWord) "أيوة يا فندم! سمعت كلمة التنبيه وسامع أمرك..."
@@ -140,72 +140,57 @@ private fun AssistOverlaySheet(
     fun executeCommand(raw: String) {
         scope.launch {
             val settings = settingsRepo.currentSettings()
-            val perms = PermissionHealthChecker.inspect(activity)
-            val memState = memoryStore.current()
-            val (_, parsedIntent) = EgyptianColloquialNluParser.parse(
-                rawInput = raw,
-                configuredWakePhrase = settings.wakePhrase,
-                contextState = memState
-            )
+            assistantTitle = "${settings.assistantName} — المساعد الشخصي"
+            ttsManager.applyVoicePreferences(settings.voiceGender, settings.selectedTtsVoiceName)
             val voicePassed = voiceMatchScore == null ||
                 !settings.voiceMatchEnabled ||
                 voiceMatchScore >= settings.voiceMatchThreshold ||
                 settings.allowOwnerFallbackOnLowVoiceMatch
 
-            when (val verdict = CommandGuardrailValidator.validate(
-                intent = parsedIntent,
+            val outcome = commandProcessor.process(
+                rawInput = raw,
                 settings = settings,
-                permissions = perms,
-                voiceMatchPassed = voicePassed
-            )) {
-                is GuardrailVerdict.Denied -> {
-                    isBlocked = true
-                    val reply = JarvisEgyptianResponder.formatGuardrailBlockReply(
-                        verdict.reasonAr,
-                        settings.personaTone
-                    )
-                    statusText = reply
-                    memoryStore.recordTurn(raw, reply, parsedIntent.categoryName)
-                    ttsManager.speak(reply, settings.ttsSpeechRate, settings.ttsPitch)
-                }
-
-                is GuardrailVerdict.Allowed -> {
-                    isBlocked = false
-                    val result = DeviceActionExecutor.execute(
-                        context = activity,
-                        intent = verdict.intent,
-                        tone = settings.personaTone,
-                        memoryState = memState
-                    )
-                    statusText = result.replyAr
-                    memoryStore.recordTurn(
-                        userText = raw,
-                        assistantReply = result.replyAr,
-                        intentCategory = verdict.intent.categoryName,
-                        newAppContext = result.newAppContext,
-                        newSearchQuery = result.newSearchQuery,
-                        newOpenedApp = result.newOpenedApp
-                    )
-                    ttsManager.speak(result.replyAr, settings.ttsSpeechRate, settings.ttsPitch)
-                }
-            }
+                voiceMatchPassed = voicePassed,
+                voiceMatchScore = voiceMatchScore,
+                onStopSpeech = { ttsManager.stop() }
+            )
+            isBlocked = outcome.isBlocked
+            statusText = outcome.replyAr
+            ttsManager.speak(
+                text = outcome.spokenReplyAr,
+                rate = settings.ttsSpeechRate,
+                pitch = settings.ttsPitch,
+                voiceGender = settings.voiceGender,
+                selectedVoiceName = settings.selectedTtsVoiceName
+            )
         }
     }
 
     fun startMic() {
-        transcript = "جاري الاستماع بالعامية المصرية..."
-        sttManager.startListening(
-            onRmsDb = {},
-            onPartialResult = { transcript = it },
-            onFinalResult = { finalText ->
-                transcript = finalText
-                executeCommand(finalText)
-            },
-            onError = { transcript = it }
-        )
+        scope.launch {
+            transcript = "جاري الاستماع بالعامية المصرية..."
+            val res = MicrophoneArbitrator.withMicAccess(MicOwner.ASSIST_SESSION_STT) {
+                sttManager.listenOnce(
+                    timeoutMs = 10_000L,
+                    onPartialResult = { transcript = it }
+                )
+            }
+            res.fold(
+                onSuccess = { finalText ->
+                    transcript = finalText
+                    executeCommand(finalText)
+                },
+                onFailure = { err ->
+                    transcript = err.message ?: "تعذر الاستماع"
+                }
+            )
+        }
     }
 
     LaunchedEffect(Unit) {
+        val settings = settingsRepo.currentSettings()
+        assistantTitle = "${settings.assistantName} — المساعد الشخصي"
+        ttsManager.applyVoicePreferences(settings.voiceGender, settings.selectedTtsVoiceName)
         startMic()
     }
 
@@ -257,7 +242,7 @@ private fun AssistOverlaySheet(
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            text = "شيتا — المساعد الشخصي",
+                            text = assistantTitle,
                             style = MaterialTheme.typography.titleMedium,
                             color = CheetahCyan,
                             fontWeight = FontWeight.Bold

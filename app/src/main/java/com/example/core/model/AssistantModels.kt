@@ -28,6 +28,28 @@ enum class PersonaTone(
     )
 }
 
+enum class AssistantGender(val labelAr: String, val labelEn: String) {
+    MALE("مذكر", "Male"),
+    FEMALE("مؤنث", "Female")
+}
+
+enum class WakePipelineState(val labelAr: String, val labelEn: String) {
+    IDLE_WAKE_LISTENING("بيسمع لكلمة التنبيه أوفلاين...", "IDLE_WAKE_LISTENING"),
+    WAKE_DETECTED("تم التقاط كلمة التنبيه", "WAKE_DETECTED"),
+    COMMAND_LISTENING("سامعك، قول أمرك...", "COMMAND_LISTENING"),
+    PROCESSING("بيحلل وينفذ الأمر...", "PROCESSING"),
+    SPEAKING("بيرد بالعامية المصرية...", "SPEAKING")
+}
+
+data class TransitionLogEntry(
+    val id: Long,
+    val timestampMs: Long,
+    val fromState: WakePipelineState,
+    val toState: WakePipelineState,
+    val reason: String,
+    val isError: Boolean = false
+)
+
 enum class AssistantPipelineState(val labelAr: String, val labelEn: String) {
     IDLE("في وضع الاستعداد", "STANDBY"),
     LISTENING_WAKE_WORD("بيسمع لكلمة التنبيه أوفلاين...", "WAKE_LISTENING"),
@@ -55,7 +77,100 @@ data class WakeDiagnosticSnapshot(
     val lastWakeTimestampMs: Long? = null,
     val lastError: String? = null,
     val falseActivationsCount: Int = 0,
-    val ambientNoiseRms: Float = 0f
+    val ambientNoiseRms: Float = 0f,
+    val audioRecordRecoveriesCount: Int = 0,
+    val watchdogTimeoutsCount: Int = 0
+)
+
+enum class LocalLlmStorageMode(val labelAr: String) {
+    IN_PLACE_URI("تشغيل من الملف الأصلي (SAF بدون نسخ)"),
+    COPIED_INTERNAL("نسخ لملفات التطبيق الداخلية")
+}
+
+enum class LocalLlmLoadState(val labelAr: String) {
+    UNLOADED("غير محمّل"),
+    LOADING("جاري التحميل..."),
+    LOADED("محمّل وجاهز"),
+    ERROR("خطأ في التحميل")
+}
+
+data class GgufModelMetadata(
+    val displayName: String = "",
+    val fileSizeBytes: Long = 0L,
+    val architecture: String = "",
+    val quantization: String = "",
+    val sourceUri: String = "",
+    val internalPath: String = "",
+    val storageMode: LocalLlmStorageMode = LocalLlmStorageMode.IN_PLACE_URI,
+    val chatTemplateRaw: String = "",
+    val chatTemplateFamily: ChatTemplateFamily = ChatTemplateFamily.GENERIC_UNKNOWN,
+    val templateWarningAr: String? = null
+)
+
+data class LocalLlmConfig(
+    val modelUri: String = "",
+    val internalPath: String = "",
+    val displayName: String = "",
+    val fileSizeBytes: Long = 0L,
+    val quantization: String = "",
+    val architecture: String = "",
+    val storageMode: LocalLlmStorageMode = LocalLlmStorageMode.IN_PLACE_URI,
+    val contextLength: Int = 1024,
+    val maxTokens: Int = 192,
+    val temperature: Float = 0.65f,
+    val cpuThreads: Int = 4,
+    val chatTemplateRaw: String = "",
+    val chatTemplateFamily: ChatTemplateFamily = ChatTemplateFamily.GENERIC_UNKNOWN,
+    val useAiForGeneral: Boolean = true,
+    val aiMode: AiMode = AiMode.BALANCED,
+    val judgeSearchWithAi: Boolean = true,
+    val searchEvalCount: Int = 5,
+    val showReasoning: Boolean = false,
+    val showSources: Boolean = true,
+    val maxThinkingSeconds: Int = 25,
+    val performanceProfile: PerformanceProfile = PerformanceProfile.BALANCED,
+    val autoUnloadMinutes: Int = 10
+)
+
+data class LocalLlmRuntimeStatus(
+    val loadState: LocalLlmLoadState = LocalLlmLoadState.UNLOADED,
+    val metadata: GgufModelMetadata? = null,
+    val isGenerating: Boolean = false,
+    val isThinking: Boolean = false,
+    val thinkingElapsedMs: Long = 0L,
+    val nativeBackendAvailable: Boolean = true,
+    val freeInternalBytes: Long = 0L,
+    val availableRamMb: Long = 0L,
+    val totalRamMb: Long = 0L,
+    val ramWarningAr: String? = null,
+    val templateWarningAr: String? = null,
+    val lastErrorAr: String? = null,
+    val tokensPerSec: Float = 0f,
+    val lastBenchmark: ModelBenchmarkResult? = null,
+    val deviceHealth: DeviceHealthSnapshot = DeviceHealthSnapshot()
+)
+
+data class TtsVoiceCandidate(
+    val name: String,
+    val localeTag: String,
+    val detectedGender: AssistantGender?,
+    val isOffline: Boolean,
+    val qualityScore: Int
+)
+
+data class WebSearchSource(
+    val title: String,
+    val snippet: String,
+    val url: String,
+    val provider: String
+)
+
+data class WebSearchOutcome(
+    val query: String,
+    val summaryText: String,
+    val sources: List<WebSearchSource> = emptyList(),
+    val fromCache: Boolean = false,
+    val errorAr: String? = null
 )
 
 data class EndLineRule(
@@ -143,6 +258,10 @@ data class VoiceTemplateSample(
 }
 
 data class AssistantSettings(
+    val assistantName: String = "شيتا",
+    val assistantGender: AssistantGender = AssistantGender.MALE,
+    val voiceGender: AssistantGender = AssistantGender.MALE,
+    val selectedTtsVoiceName: String = "",
     val wakePhrase: String = "يا شيتا",
     val wakeSetupMode: WakeWordSetupMode = WakeWordSetupMode.TEXT_TYPED,
     val wakeSensitivity: Float = 0.65f,
@@ -157,8 +276,42 @@ data class AssistantSettings(
     val isListeningMuted: Boolean = false,
     val allowAccessibilityAutomation: Boolean = false,
     val requireVoiceMatchForSensitive: Boolean = true,
-    val openDialerInsteadOfDirectCall: Boolean = true
-)
+    val openDialerInsteadOfDirectCall: Boolean = true,
+    // Per-feature permission toggles (Bug A3)
+    val micFeatureEnabled: Boolean = false,
+    val notificationsFeatureEnabled: Boolean = false,
+    val batteryExemptionFeatureEnabled: Boolean = false,
+    val accessibilityFeatureEnabled: Boolean = false,
+    val overlayFeatureEnabled: Boolean = false,
+    val micPermissionRequestedOnce: Boolean = false,
+    val notifPermissionRequestedOnce: Boolean = false,
+    // Optional keyless HTTPS search (Part D) - OFF by default
+    val internetSearchEnabled: Boolean = false,
+    val customSearxngUrl: String = "",
+    val trustedDomains: List<String> = DEFAULT_TRUSTED_DOMAINS,
+    val untrustedDomains: List<String> = DEFAULT_UNTRUSTED_DOMAINS,
+    // Local GGUF LLM config (Part B & v0.4.0 AI Brain)
+    val localLlmConfig: LocalLlmConfig = LocalLlmConfig()
+) {
+    companion object {
+        val DEFAULT_TRUSTED_DOMAINS = listOf(
+            "wikipedia.org",
+            "ar.wikipedia.org",
+            "en.wikipedia.org",
+            "who.int",
+            "un.org",
+            "reuters.com",
+            "bbc.com",
+            "aljazeera.net",
+            "gov.eg"
+        )
+        val DEFAULT_UNTRUSTED_DOMAINS = listOf(
+            "pinterest.com",
+            "quora.com",
+            "clickbait-example.invalid"
+        )
+    }
+}
 
 data class PermissionHealthState(
     val hasMicPermission: Boolean = false,
@@ -235,6 +388,7 @@ data class ConversationContextState(
     val activeAppContext: ActiveAppContext = ActiveAppContext.NONE,
     val lastSearchQuery: String? = null,
     val lastOpenedApp: String? = null,
+    val rollingSummary: String = "",
     val recentEntries: List<ConversationMemoryEntry> = emptyList(),
     val shortcuts: List<PersonalShortcut> = emptyList()
 )
@@ -251,6 +405,11 @@ sealed class EgyptianIntent(val categoryName: String) {
 
     data class WebSearch(val query: String) :
         EgyptianIntent("WEB_SEARCH")
+
+    data class KnowledgeOrChatQuery(
+        val query: String,
+        val explicitlyRequestsOnlineSearch: Boolean = false
+    ) : EgyptianIntent("KNOWLEDGE_QUERY")
 
     data class MediaControl(val action: MediaAction) :
         EgyptianIntent("MEDIA_CONTROL")
@@ -311,5 +470,16 @@ data class InteractionTrace(
     val isBlocked: Boolean,
     val assistantReplyAr: String,
     val voiceMatchScore: Float? = null,
-    val timestampFormatted: String
+    val timestampFormatted: String,
+    val sources: List<WebSearchSource> = emptyList(),
+    val generatedByLocalLlm: Boolean = false,
+    val taskTypeLabel: String? = null,
+    val reasoningText: String? = null,
+    val thinkingElapsedMs: Long? = null,
+    val searchConfidence: SearchConfidence? = null,
+    val judgedSources: List<JudgedSearchSource> = emptyList(),
+    val proposedAction: ProposedAction? = null,
+    val hasContinuation: Boolean = false,
+    val fullTextForContinuation: String? = null,
+    val suggestModelSettingsShortcut: Boolean = false
 )

@@ -11,15 +11,25 @@ plugins {
 android {
   namespace = "com.example"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
+  ndkVersion = "28.2.13676358"
 
   defaultConfig {
     applicationId = "com.aistudio.cheetahassistant.egxkar"
     minSdk = 24
     targetSdk = 36
-    versionCode = 2
-    versionName = "0.2.0"
+    versionCode = 4
+    versionName = "0.4.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    externalNativeBuild {
+      cmake {
+        arguments += listOf("-DANDROID_STL=c++_shared")
+      }
+    }
+    ndk {
+      abiFilters += listOf("arm64-v8a")
+    }
   }
 
   // Do not remove or modify these signingConfigs. They are necessary for building, installing,
@@ -65,6 +75,12 @@ android {
   }
   androidResources {
     noCompress += listOf("bin", "tflite")
+  }
+  externalNativeBuild {
+    cmake {
+      path = file("src/main/cpp/CMakeLists.txt")
+      version = "3.22.1"
+    }
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
   dependenciesInfo {

@@ -9,16 +9,14 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
 import com.example.R
-import com.example.controller.DeviceActionExecutor
-import com.example.controller.PermissionHealthChecker
-import com.example.core.model.GuardrailVerdict
 import com.example.data.ConversationMemoryStore
 import com.example.data.SettingsRepository
-import com.example.guardrails.CommandGuardrailValidator
-import com.example.intelligence.EgyptianColloquialNluParser
-import com.example.intelligence.JarvisEgyptianResponder
+import com.example.intelligence.AssistantCommandProcessor
+import com.example.llm.LocalLlmManager
 import com.example.voice.EgyptianOfflineSttManager
 import com.example.voice.EgyptianTtsManager
+import com.example.voice.MicOwner
+import com.example.voice.MicrophoneArbitrator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -36,6 +34,8 @@ class CheetahVoiceInteractionSession(context: Context) : VoiceInteractionSession
     private val memoryStore = ConversationMemoryStore(context)
     private val sttManager = EgyptianOfflineSttManager(context)
     private val ttsManager = EgyptianTtsManager(context)
+    private val localLlmManager = LocalLlmManager(context.applicationContext, settingsRepo)
+    private val commandProcessor = AssistantCommandProcessor(context.applicationContext, memoryStore, localLlmManager)
 
     private var statusView: TextView? = null
     private var transcriptView: TextView? = null
@@ -70,68 +70,46 @@ class CheetahVoiceInteractionSession(context: Context) : VoiceInteractionSession
     }
 
     private fun startVoiceCapture() {
-        transcriptView?.text = "جاري الاستماع محلياً (ar-EG)..."
-        sttManager.startListening(
-            onRmsDb = {},
-            onPartialResult = { partial ->
-                transcriptView?.text = "سمعت: $partial"
-            },
-            onFinalResult = { finalText ->
-                transcriptView?.text = "أمرك: $finalText"
-                processCommand(finalText)
-            },
-            onError = { errMsg ->
-                transcriptView?.text = errMsg
+        scope.launch {
+            transcriptView?.text = "جاري الاستماع محلياً (ar-EG)..."
+            val res = MicrophoneArbitrator.withMicAccess(MicOwner.ASSIST_SESSION_STT) {
+                sttManager.listenOnce(
+                    timeoutMs = 10_000L,
+                    onPartialResult = { partial ->
+                        transcriptView?.text = "سمعت: $partial"
+                    }
+                )
             }
-        )
+            res.fold(
+                onSuccess = { finalText ->
+                    transcriptView?.text = "أمرك: $finalText"
+                    processCommand(finalText)
+                },
+                onFailure = { err ->
+                    transcriptView?.text = err.message ?: "تعذر الاستماع"
+                }
+            )
+        }
     }
 
     private fun processCommand(rawText: String) {
         scope.launch {
             val settings = settingsRepo.currentSettings()
-            val permissions = PermissionHealthChecker.inspect(context)
-            val memState = memoryStore.current()
-            val (_, intent) = EgyptianColloquialNluParser.parse(
+            ttsManager.applyVoicePreferences(settings.voiceGender, settings.selectedTtsVoiceName)
+            val outcome = commandProcessor.process(
                 rawInput = rawText,
-                configuredWakePhrase = settings.wakePhrase,
-                contextState = memState
-            )
-
-            when (val verdict = CommandGuardrailValidator.validate(
-                intent = intent,
                 settings = settings,
-                permissions = permissions,
-                voiceMatchPassed = true
-            )) {
-                is GuardrailVerdict.Denied -> {
-                    val reply = JarvisEgyptianResponder.formatGuardrailBlockReply(
-                        verdict.reasonAr,
-                        settings.personaTone
-                    )
-                    statusView?.text = reply
-                    memoryStore.recordTurn(rawText, reply, intent.categoryName)
-                    ttsManager.speak(reply, settings.ttsSpeechRate, settings.ttsPitch)
-                }
-
-                is GuardrailVerdict.Allowed -> {
-                    val result = DeviceActionExecutor.execute(
-                        context = context,
-                        intent = verdict.intent,
-                        tone = settings.personaTone,
-                        memoryState = memState
-                    )
-                    statusView?.text = result.replyAr
-                    memoryStore.recordTurn(
-                        userText = rawText,
-                        assistantReply = result.replyAr,
-                        intentCategory = verdict.intent.categoryName,
-                        newAppContext = result.newAppContext,
-                        newSearchQuery = result.newSearchQuery,
-                        newOpenedApp = result.newOpenedApp
-                    )
-                    ttsManager.speak(result.replyAr, settings.ttsSpeechRate, settings.ttsPitch)
-                }
-            }
+                voiceMatchPassed = true,
+                onStopSpeech = { ttsManager.stop() }
+            )
+            statusView?.text = outcome.replyAr
+            ttsManager.speak(
+                text = outcome.spokenReplyAr,
+                rate = settings.ttsSpeechRate,
+                pitch = settings.ttsPitch,
+                voiceGender = settings.voiceGender,
+                selectedVoiceName = settings.selectedTtsVoiceName
+            )
         }
     }
 

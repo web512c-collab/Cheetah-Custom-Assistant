@@ -89,6 +89,7 @@ object CommandGuardrailValidator {
             is EgyptianIntent.OpenApp,
             is EgyptianIntent.YouTubeSearchPlay,
             is EgyptianIntent.WebSearch,
+            is EgyptianIntent.KnowledgeOrChatQuery,
             is EgyptianIntent.MediaControl,
             is EgyptianIntent.DeviceSettingPanel,
             is EgyptianIntent.SetAlarmOrTimer,

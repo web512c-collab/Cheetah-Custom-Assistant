@@ -5,3 +5,6 @@
 -keep class com.example.voice.CheetahWakeWordService { *; }
 -keep class com.example.voice.BundledYaSheetaAcousticModel { *; }
 -keep class com.example.voice.BootCompletedReceiver { *; }
+-keep class com.example.voice.WakeWatchdogReceiver { *; }
+-keep class com.example.llm.LlamaNativeBridge { *; }
+-keep interface com.example.llm.LlamaTokenCallback { *; }

@@ -1,7 +1,11 @@
 package com.example.voice
 
 import com.example.core.model.AssistantPipelineState
+import com.example.core.model.LocalLlmRuntimeStatus
+import com.example.core.model.ProposedAction
+import com.example.core.model.TransitionLogEntry
 import com.example.core.model.WakeDiagnosticSnapshot
+import com.example.core.model.WakePipelineState
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -20,9 +24,12 @@ data class WakeTriggerEvent(
 
 /**
  * In-process reactive telemetry bus bridging WakeWordDetectionService,
- * VoiceInteractionSession, AssistActivity, and Jetpack Compose Console/Diagnostics UI.
+ * LocalLlmManager, AssistantBrain, OnlineSearchManager, VoiceInteractionSession,
+ * AssistActivity, and Jetpack Compose Console/Diagnostics UI.
  */
 object CheetahRuntimeBus {
+    private const val MAX_TRANSITION_LOG = 50
+
     private val _serviceRunning = MutableStateFlow(false)
     val serviceRunning: StateFlow<Boolean> = _serviceRunning.asStateFlow()
 
@@ -38,16 +45,41 @@ object CheetahRuntimeBus {
     private val _pipelineState = MutableStateFlow(AssistantPipelineState.IDLE)
     val pipelineState: StateFlow<AssistantPipelineState> = _pipelineState.asStateFlow()
 
+    private val _wakePipelineState = MutableStateFlow(WakePipelineState.IDLE_WAKE_LISTENING)
+    val wakePipelineState: StateFlow<WakePipelineState> = _wakePipelineState.asStateFlow()
+
+    private val _transitionLog = MutableStateFlow<List<TransitionLogEntry>>(emptyList())
+    val transitionLog: StateFlow<List<TransitionLogEntry>> = _transitionLog.asStateFlow()
+
     private val _diagnostics = MutableStateFlow(WakeDiagnosticSnapshot())
     val diagnostics: StateFlow<WakeDiagnosticSnapshot> = _diagnostics.asStateFlow()
 
     private val _wakeEvents = MutableSharedFlow<WakeTriggerEvent>(extraBufferCapacity = 8)
     val wakeEvents: SharedFlow<WakeTriggerEvent> = _wakeEvents.asSharedFlow()
 
+    private val _localLlmStatus = MutableStateFlow(LocalLlmRuntimeStatus())
+    val localLlmStatus: StateFlow<LocalLlmRuntimeStatus> = _localLlmStatus.asStateFlow()
+
+    private val _streamingReplyText = MutableStateFlow("")
+    val streamingReplyText: StateFlow<String> = _streamingReplyText.asStateFlow()
+
+    private val _isNetworkSearching = MutableStateFlow(false)
+    val isNetworkSearching: StateFlow<Boolean> = _isNetworkSearching.asStateFlow()
+
+    private val _pendingContinuationText = MutableStateFlow<String?>(null)
+    val pendingContinuationText: StateFlow<String?> = _pendingContinuationText.asStateFlow()
+
+    private val _pendingProposedAction = MutableStateFlow<ProposedAction?>(null)
+    val pendingProposedAction: StateFlow<ProposedAction?> = _pendingProposedAction.asStateFlow()
+
+    private val _incomingSharedText = MutableStateFlow<String?>(null)
+    val incomingSharedText: StateFlow<String?> = _incomingSharedText.asStateFlow()
+
     fun setServiceRunning(running: Boolean) {
         _serviceRunning.value = running
         if (!running) {
             _liveMicLevel.value = 0f
+            _wakePipelineState.value = WakePipelineState.IDLE_WAKE_LISTENING
             _diagnostics.update {
                 it.copy(
                     audioRecordStatus = "STOPPED",
@@ -72,6 +104,26 @@ object CheetahRuntimeBus {
         _pipelineState.value = state
     }
 
+    fun recordStateTransition(entry: TransitionLogEntry) {
+        _wakePipelineState.value = entry.toState
+        val mappedUiState = when (entry.toState) {
+            WakePipelineState.IDLE_WAKE_LISTENING ->
+                if (_serviceRunning.value) AssistantPipelineState.LISTENING_WAKE_WORD else AssistantPipelineState.IDLE
+            WakePipelineState.WAKE_DETECTED -> AssistantPipelineState.WAKE_ACKNOWLEDGED
+            WakePipelineState.COMMAND_LISTENING -> AssistantPipelineState.LISTENING_COMMAND
+            WakePipelineState.PROCESSING -> AssistantPipelineState.THINKING_LOCAL
+            WakePipelineState.SPEAKING -> AssistantPipelineState.SPEAKING
+        }
+        _pipelineState.value = mappedUiState
+        _transitionLog.update { current ->
+            (listOf(entry) + current).take(MAX_TRANSITION_LOG)
+        }
+    }
+
+    fun clearTransitionLog() {
+        _transitionLog.value = emptyList()
+    }
+
     fun updateDiagnostics(transform: (WakeDiagnosticSnapshot) -> WakeDiagnosticSnapshot) {
         _diagnostics.update(transform)
     }
@@ -82,13 +134,51 @@ object CheetahRuntimeBus {
         }
     }
 
+    fun incrementAudioRecordRecoveries() {
+        _diagnostics.update {
+            it.copy(audioRecordRecoveriesCount = it.audioRecordRecoveriesCount + 1)
+        }
+    }
+
+    fun incrementWatchdogTimeouts() {
+        _diagnostics.update {
+            it.copy(watchdogTimeoutsCount = it.watchdogTimeoutsCount + 1)
+        }
+    }
+
     fun resetDiagnosticsCounters() {
         _diagnostics.update {
             it.copy(
                 falseActivationsCount = 0,
+                audioRecordRecoveriesCount = 0,
+                watchdogTimeoutsCount = 0,
                 lastError = null
             )
         }
+    }
+
+    fun updateLocalLlmStatus(transform: (LocalLlmRuntimeStatus) -> LocalLlmRuntimeStatus) {
+        _localLlmStatus.update(transform)
+    }
+
+    fun setStreamingReplyText(text: String) {
+        _streamingReplyText.value = text
+    }
+
+    fun setNetworkSearching(active: Boolean) {
+        _isNetworkSearching.value = active
+    }
+
+    fun setPendingContinuationText(text: String?) {
+        _pendingContinuationText.value = text?.takeIf { it.isNotBlank() }
+    }
+
+    fun setPendingProposedAction(action: ProposedAction?) {
+        _pendingProposedAction.value = action
+    }
+
+    fun setIncomingSharedText(text: String?) {
+        _incomingSharedText.value = text?.trim()?.takeIf { it.isNotEmpty() }
     }
 
     fun emitWakeTrigger(event: WakeTriggerEvent) {

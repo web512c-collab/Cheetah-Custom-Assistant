@@ -1,6 +1,10 @@
 package com.example
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -17,9 +21,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Architecture
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -29,16 +30,11 @@ import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -55,6 +51,7 @@ import androidx.navigation.compose.rememberNavController
 import com.example.controller.PermissionHealthChecker
 import com.example.ui.screens.ArchitectureScreen
 import com.example.ui.screens.ConsoleScreen
+import com.example.ui.screens.GgufStorageModeDialog
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.theme.CheetahAssistantTheme
 import com.example.ui.theme.CheetahCyan
@@ -63,6 +60,8 @@ import com.example.ui.theme.CheetahSlate
 import com.example.ui.theme.CheetahTextSecondary
 import com.example.ui.viewmodel.AssistantViewModel
 import com.example.voice.BootCompletedReceiver
+import com.example.voice.CheetahRuntimeBus
+import com.example.voice.EgyptianTtsManager
 
 private const val ROUTE_CONSOLE = "console"
 private const val ROUTE_SETTINGS = "settings"
@@ -81,10 +80,17 @@ private val CHEETAH_DESTINATIONS = listOf(
     NavDestination(ROUTE_ARCHITECTURE, "الهندسة", Icons.Default.Architecture, "nav_architecture")
 )
 
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        extractSharedPlainText(intent)
         val resumeWakeFromBoot = intent?.getBooleanExtra(
             BootCompletedReceiver.EXTRA_RESUME_WAKE_LISTENER,
             false
@@ -96,6 +102,21 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        extractSharedPlainText(intent)
+    }
+
+    private fun extractSharedPlainText(incoming: Intent?) {
+        if (incoming?.action == Intent.ACTION_SEND && incoming.type == "text/plain") {
+            val shared = incoming.getStringExtra(Intent.EXTRA_TEXT)
+            if (!shared.isNullOrBlank()) {
+                CheetahRuntimeBus.setIncomingSharedText(shared)
+            }
+        }
+    }
 }
 
 @Composable
@@ -104,6 +125,7 @@ fun CheetahAppRoot(
     viewModel: AssistantViewModel = viewModel()
 ) {
     val context = LocalContext.current
+    val activity = context.findActivity()
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route ?: ROUTE_CONSOLE
@@ -115,6 +137,10 @@ fun CheetahAppRoot(
     val ttsStatus by viewModel.ttsStatus.collectAsStateWithLifecycle()
     val offlineSttStatus by viewModel.offlineSttStatus.collectAsStateWithLifecycle()
     val diagnostics by viewModel.diagnostics.collectAsStateWithLifecycle()
+    val transitionLog by viewModel.transitionLog.collectAsStateWithLifecycle()
+    val localLlmStatus by viewModel.localLlmStatus.collectAsStateWithLifecycle()
+    val streamingReplyText by viewModel.streamingReplyText.collectAsStateWithLifecycle()
+    val isNetworkSearching by viewModel.isNetworkSearching.collectAsStateWithLifecycle()
     val memoryState by viewModel.memoryState.collectAsStateWithLifecycle()
     val serviceRunning by viewModel.serviceRunning.collectAsStateWithLifecycle()
     val liveMicLevel by viewModel.liveMicLevel.collectAsStateWithLifecycle()
@@ -124,6 +150,11 @@ fun CheetahAppRoot(
     val isRecordingEnrollment by viewModel.isRecordingEnrollment.collectAsStateWithLifecycle()
     val enrollmentAmplitude by viewModel.enrollmentAmplitude.collectAsStateWithLifecycle()
     val enrollmentFeedbackAr by viewModel.enrollmentFeedbackAr.collectAsStateWithLifecycle()
+    val pendingGgufImport by viewModel.pendingGgufImport.collectAsStateWithLifecycle()
+    val incomingSharedText by viewModel.incomingSharedText.collectAsStateWithLifecycle()
+    val pendingContinuationText by viewModel.pendingContinuationText.collectAsStateWithLifecycle()
+    val pendingProposedAction by viewModel.pendingProposedAction.collectAsStateWithLifecycle()
+    val isBenchmarkRunning by viewModel.isBenchmarkRunning.collectAsStateWithLifecycle()
 
     LaunchedEffect(resumeWakeFromBoot) {
         if (resumeWakeFromBoot) {
@@ -144,54 +175,89 @@ fun CheetahAppRoot(
 
     val micLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { viewModel.refreshPermissions() }
+    ) { granted ->
+        viewModel.refreshPermissions()
+        if (granted) {
+            viewModel.setMicFeatureEnabled(true)
+        }
+    }
 
     val notifLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { viewModel.refreshPermissions() }
-
-    var showMicRationale by remember { mutableStateOf(false) }
+    ) { granted ->
+        viewModel.refreshPermissions()
+        if (granted) {
+            viewModel.setNotificationsFeatureEnabled(true)
+        }
+    }
 
     val roleLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { viewModel.refreshPermissions() }
 
-    if (showMicRationale) {
-        AlertDialog(
-            onDismissRequest = { showMicRationale = false },
-            containerColor = CheetahSlate,
-            title = {
-                Text(
-                    text = "صلاحية المايكروفون (محلياً 100%)",
-                    color = CheetahCyan
+    val ggufPickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.inspectPickedGgufUri(uri)
+        }
+    }
+
+    // Bug A3 compliant permission switch handlers: never re-prompt if granted; route permanent denial to App Info
+    val handleMicSwitchToggle: (Boolean) -> Unit = { wantOn ->
+        if (!wantOn) {
+            viewModel.setMicFeatureEnabled(false)
+        } else {
+            val osGranted = PermissionHealthChecker.inspect(context).hasMicPermission
+            if (osGranted) {
+                viewModel.setMicFeatureEnabled(true)
+            } else if (PermissionHealthChecker.isPermissionPermanentlyDenied(
+                    activity = activity,
+                    permission = Manifest.permission.RECORD_AUDIO,
+                    wasRequestedBefore = settings.micPermissionRequestedOnce
                 )
-            },
-            text = {
-                Text(
-                    text = "شيتا بيستخدم المايكروفون على جهازك فقط عشان يسمع اسم التنبيه، يتحقق من بصمة صوتك (Voice Match)، ويفهم أوامرك بالعامية المصرية أوفلاين. التطبيق مفيهوش أصلاً صلاحية إنترنت ومش بيبعت أي صوت بره موبايلك.",
-                    color = Color.White
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showMicRationale = false
-                        micLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = CheetahCyan),
-                    modifier = Modifier.testTag("mic_rationale_confirm_btn")
-                ) {
-                    Text("موافق، فعّل المايك", color = CheetahObsidian)
+            ) {
+                runCatching {
+                    context.startActivity(PermissionHealthChecker.buildAppDetailsSettingsIntent(context))
                 }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = { showMicRationale = false },
-                    modifier = Modifier.testTag("mic_rationale_cancel_btn")
-                ) {
-                    Text("مش دلوقتي", color = CheetahTextSecondary)
-                }
+            } else {
+                viewModel.markMicPermissionRequestedOnce()
+                micLauncher.launch(Manifest.permission.RECORD_AUDIO)
             }
+        }
+    }
+
+    val handleNotifSwitchToggle: (Boolean) -> Unit = { wantOn ->
+        if (!wantOn) {
+            viewModel.setNotificationsFeatureEnabled(false)
+        } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            viewModel.setNotificationsFeatureEnabled(true)
+        } else {
+            val osGranted = PermissionHealthChecker.inspect(context).hasNotificationPermission
+            if (osGranted) {
+                viewModel.setNotificationsFeatureEnabled(true)
+            } else if (PermissionHealthChecker.isPermissionPermanentlyDenied(
+                    activity = activity,
+                    permission = Manifest.permission.POST_NOTIFICATIONS,
+                    wasRequestedBefore = settings.notifPermissionRequestedOnce
+                )
+            ) {
+                runCatching {
+                    context.startActivity(PermissionHealthChecker.buildAppDetailsSettingsIntent(context))
+                }
+            } else {
+                viewModel.markNotifPermissionRequestedOnce()
+                notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+
+    pendingGgufImport?.let { (_, meta) ->
+        GgufStorageModeDialog(
+            metadata = meta,
+            freeInternalBytes = localLlmStatus.freeInternalBytes,
+            onSelectMode = { mode -> viewModel.confirmImportGgufModel(mode) },
+            onDismiss = { viewModel.cancelPendingGgufImport() }
         )
     }
 
@@ -274,12 +340,27 @@ fun CheetahAppRoot(
                                 liveMicLevel = liveMicLevel,
                                 pipelineState = pipelineState,
                                 partialTranscript = partialTranscript,
+                                streamingReplyText = streamingReplyText,
+                                isNetworkSearching = isNetworkSearching,
+                                localLlmStatus = localLlmStatus,
                                 traces = traces,
+                                incomingSharedText = incomingSharedText,
+                                pendingContinuationText = pendingContinuationText,
+                                pendingProposedAction = pendingProposedAction,
                                 onStartVoiceCommand = { viewModel.startVoiceCommand() },
                                 onSubmitTextCommand = { viewModel.submitTextCommand(it) },
+                                onSubmitTextWithAttachment = { cmd, att ->
+                                    viewModel.submitTextWithAttachment(cmd, att)
+                                },
+                                onConsumeSharedText = { viewModel.consumeIncomingSharedText() },
+                                onReadClipboard = { viewModel.readClipboardText() },
+                                onConfirmProposedAction = { viewModel.confirmProposedAction(it) },
+                                onDismissProposedAction = { viewModel.dismissProposedAction() },
+                                onContinueSpeech = { viewModel.continueSpeakingLongReply() },
                                 onToggleContinuousListening = { viewModel.toggleContinuousListening(it) },
                                 onToggleMute = { viewModel.toggleMute() },
-                                onRequestMicPermission = { showMicRationale = true },
+                                onRequestMicPermission = { handleMicSwitchToggle(true) },
+                                onCancelLlmGeneration = { viewModel.cancelLlmGeneration() },
                                 onOpenSettingsTab = {
                                     navController.navigate(ROUTE_SETTINGS) {
                                         launchSingleTop = true
@@ -297,12 +378,15 @@ fun CheetahAppRoot(
                                 ttsStatus = ttsStatus,
                                 offlineSttStatus = offlineSttStatus,
                                 diagnostics = diagnostics,
+                                transitionLog = transitionLog,
+                                localLlmStatus = localLlmStatus,
                                 memoryState = memoryState,
                                 serviceRunning = serviceRunning,
                                 liveMicLevel = liveMicLevel,
                                 isRecordingEnrollment = isRecordingEnrollment,
                                 enrollmentAmplitude = enrollmentAmplitude,
                                 enrollmentFeedbackAr = enrollmentFeedbackAr,
+                                isBenchmarkRunning = isBenchmarkRunning,
                                 onLaunchDefaultAssistantPicker = {
                                     roleLauncher.launch(
                                         PermissionHealthChecker.buildDefaultAssistantIntent(context)
@@ -312,6 +396,16 @@ fun CheetahAppRoot(
                                     runCatching {
                                         context.startActivity(
                                             PermissionHealthChecker.buildVoiceInputSettingsIntent()
+                                        )
+                                    }
+                                },
+                                onUpdateIdentityAndGender = { name, aGender, vGender, vName ->
+                                    viewModel.updateIdentityAndGender(name, aGender, vGender, vName)
+                                },
+                                onOpenSystemTtsSettings = {
+                                    runCatching {
+                                        context.startActivity(
+                                            EgyptianTtsManager.buildTtsSystemSettingsIntent()
                                         )
                                     }
                                 },
@@ -329,37 +423,57 @@ fun CheetahAppRoot(
                                 onToggleRule = { id, en -> viewModel.toggleRule(id, en) },
                                 onToggleContinuousListening = { viewModel.toggleContinuousListening(it) },
                                 onToggleMute = { viewModel.toggleMute() },
-                                onRequestMicPermission = { showMicRationale = true },
-                                onRequestNotificationPermission = {
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                        notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                                    }
-                                },
-                                onOpenAccessibilitySettings = {
-                                    runCatching {
-                                        context.startActivity(
-                                            PermissionHealthChecker.buildAccessibilitySettingsIntent()
-                                        )
-                                    }
-                                },
-                                onOpenOverlaySettings = {
-                                    runCatching {
-                                        context.startActivity(
-                                            PermissionHealthChecker.buildOverlayPermissionIntent(context)
-                                        )
-                                    }
-                                },
-                                onRequestBatteryExemption = {
+                                onToggleMicSwitch = handleMicSwitchToggle,
+                                onToggleNotificationSwitch = handleNotifSwitchToggle,
+                                onToggleBatterySwitch = {
                                     runCatching {
                                         context.startActivity(
                                             PermissionHealthChecker.buildBatteryOptimizationIntent(context)
                                         )
                                     }
                                 },
+                                onToggleAccessibilitySwitch = {
+                                    runCatching {
+                                        context.startActivity(
+                                            PermissionHealthChecker.buildAccessibilitySettingsIntent()
+                                        )
+                                    }
+                                },
+                                onToggleOverlaySwitch = {
+                                    runCatching {
+                                        context.startActivity(
+                                            PermissionHealthChecker.buildOverlayPermissionIntent(context)
+                                        )
+                                    }
+                                },
+                                onOpenAppSettings = {
+                                    runCatching {
+                                        context.startActivity(
+                                            PermissionHealthChecker.buildAppDetailsSettingsIntent(context)
+                                        )
+                                    }
+                                },
                                 onRefreshPermissions = { viewModel.refreshPermissions() },
+                                onPickGgufModel = { ggufPickerLauncher.launch(arrayOf("*/*")) },
+                                onLoadGgufModel = { viewModel.loadGgufModel() },
+                                onUnloadGgufModel = { viewModel.unloadGgufModel() },
+                                onRemoveGgufModel = { viewModel.removeGgufModel() },
+                                onCancelLlmGeneration = { viewModel.cancelLlmGeneration() },
+                                onUpdateLlmConfig = { ctx, maxTok, temp, threads ->
+                                    viewModel.updateLlmConfig(ctx, maxTok, temp, threads)
+                                },
+                                onUpdateAiBrainConfig = { useGen, mode, judge, evalCnt, showReason, showSrc, maxSec, prof, unloadMin ->
+                                    viewModel.updateAiBrainConfig(useGen, mode, judge, evalCnt, showReason, showSrc, maxSec, prof, unloadMin)
+                                },
+                                onUpdateDomainLists = { trusted, untrusted ->
+                                    viewModel.updateDomainLists(trusted, untrusted)
+                                },
+                                onRunBenchmark = { viewModel.runModelBenchmark() },
+                                onSetInternetSearch = { en, url -> viewModel.setInternetSearch(en, url) },
                                 onRunMicDiagnosticTest = { viewModel.runControlledMicDiagnosticTest() },
                                 onMarkFalseActivation = { viewModel.markFalseActivation() },
                                 onResetDiagnosticCounters = { viewModel.resetDiagnosticCounters() },
+                                onClearTransitionLog = { viewModel.clearTransitionLog() },
                                 onAddShortcut = { trig, cmd -> viewModel.addPersonalShortcut(trig, cmd) },
                                 onDeleteShortcut = { id -> viewModel.deletePersonalShortcut(id) },
                                 onDeleteMemoryEntry = { id -> viewModel.deleteMemoryEntry(id) },
@@ -371,7 +485,9 @@ fun CheetahAppRoot(
                             ArchitectureScreen(
                                 offlineSttStatus = offlineSttStatus,
                                 ttsStatus = ttsStatus,
-                                enrolledTemplatesCount = enrolledSamples.size
+                                enrolledTemplatesCount = enrolledSamples.size,
+                                internetSearchEnabled = settings.internetSearchEnabled,
+                                localLlmStatus = localLlmStatus
                             )
                         }
                     }

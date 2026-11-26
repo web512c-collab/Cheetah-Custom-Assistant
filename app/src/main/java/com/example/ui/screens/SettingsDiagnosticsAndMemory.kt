@@ -45,6 +45,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.core.model.ConversationContextState
+import com.example.core.model.TransitionLogEntry
 import com.example.core.model.WakeDiagnosticSnapshot
 import com.example.ui.theme.CheetahAmber
 import com.example.ui.theme.CheetahBorder
@@ -153,11 +154,13 @@ private fun EngineStatusRow(
 @Composable
 fun WakeDiagnosticConsoleCard(
     diagnostics: WakeDiagnosticSnapshot,
+    transitionLog: List<TransitionLogEntry>,
     liveMicLevel: Float,
     serviceRunning: Boolean,
     onRunMicDiagnosticTest: () -> Unit,
     onMarkFalseActivation: () -> Unit,
-    onResetCounters: () -> Unit
+    onResetCounters: () -> Unit,
+    onClearTransitionLog: () -> Unit
 ) {
     val lastWakeStr = diagnostics.lastWakeTimestampMs?.let { ts ->
         SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(ts))
@@ -198,6 +201,8 @@ fun WakeDiagnosticConsoleCard(
             DiagnosticKv("وقت آخر تنبيه", lastWakeStr)
             DiagnosticKv("حالة الخدمة الخلفية", if (serviceRunning) "تعمل (Foreground)" else "متوقفة")
             DiagnosticKv("عداد التفعيل الخاطئ", "${diagnostics.falseActivationsCount}")
+            DiagnosticKv("استعادات AudioRecord التلقائية", "${diagnostics.audioRecordRecoveriesCount}")
+            DiagnosticKv("تدخلات Watchdog المهلة", "${diagnostics.watchdogTimeoutsCount}")
 
             if (!diagnostics.lastError.isNullOrBlank()) {
                 Spacer(modifier = Modifier.height(6.dp))
@@ -264,6 +269,46 @@ fun WakeDiagnosticConsoleCard(
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text("تصفير العداد", color = CheetahTextPrimary)
+                }
+            }
+
+            HorizontalDivider(color = CheetahBorder, modifier = Modifier.padding(vertical = 12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "سجل تحولات الحالة (آخر ${transitionLog.size}/50)",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = CheetahTextPrimary
+                )
+                if (transitionLog.isNotEmpty()) {
+                    OutlinedButton(onClick = onClearTransitionLog) {
+                        Text("مسح السجل", color = CheetahTextSecondary)
+                    }
+                }
+            }
+
+            if (transitionLog.isEmpty()) {
+                Text(
+                    text = "لا توجد تحولات مسجلة بعد.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = CheetahTextSecondary,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            } else {
+                Spacer(modifier = Modifier.height(6.dp))
+                val fmt = remember { SimpleDateFormat("HH:mm:ss", Locale.US) }
+                transitionLog.take(15).forEach { entry ->
+                    val ts = fmt.format(Date(entry.timestampMs))
+                    Text(
+                        text = "$ts • ${entry.fromState.name} → ${entry.toState.name} (${entry.reason})",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (entry.isError) CheetahCrimson else CheetahTextSecondary,
+                        modifier = Modifier.padding(vertical = 2.dp)
+                    )
                 }
             }
         }

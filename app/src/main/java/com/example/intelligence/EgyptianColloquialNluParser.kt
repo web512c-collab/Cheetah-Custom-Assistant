@@ -12,9 +12,8 @@ import com.example.voice.EgyptianPhoneticNormalizer
 
 /**
  * 100% self-contained on-device Egyptian Colloquial Arabic NLU & slot extractor.
- * Understands everyday Egyptian phrasing, number words, context follow-ups,
- * personal shortcuts, compound commands, and Arabic+English code-switching
- * without any cloud LLM or external API key.
+ * Deterministic intent & guardrail routing ALWAYS runs before any optional
+ * local LLM or online search query.
  */
 object EgyptianColloquialNluParser {
 
@@ -46,6 +45,13 @@ object EgyptianColloquialNluParser {
 
     private val FILLER_PREFIXES = listOf(
         "لو سمحت", "ممكن", "عشان خاطري", "من فضلك", "بسرعه", "بسرعة", "يلا"
+    )
+
+    private val QUESTION_STARTERS = listOf(
+        "مين هو ", "مين هي ", "مين ", "ايه هو ", "ايه هي ", "ايه معني ",
+        "ما هو ", "ما هي ", "ما معني ", "اشرحلي ", "فهمني ", "احكيلي عن ",
+        "معلومات عن ", "قولي عن ", "تعرف ايه عن ", "ازاي ", "ليه ", "امتي ",
+        "متي ", "كام عدد ", "الفرق بين ", "اخبار ", "حالة الطقس", "طقس ", "سعر "
     )
 
     fun parse(
@@ -126,7 +132,7 @@ object EgyptianColloquialNluParser {
             return phonetic to EgyptianIntent.CloseCurrentApp(hint)
         }
 
-        // 3. YouTube Search & Playback
+        // 3. YouTube Search & Playback (always explicit intent)
         if (containsAny(norm, "يوتيوب", "youtube", "يوتوب")) {
             val ytQuery = extractYouTubeQuery(norm)
             return if (ytQuery.isNotBlank()) {
@@ -150,7 +156,7 @@ object EgyptianColloquialNluParser {
             }
         }
 
-        // 4. Web / Google Search OR Contextual YouTube Search follow-up
+        // 4. Web / Google Search OR Contextual YouTube follow-up OR In-app Knowledge Search
         if (containsAny(norm, "دورلي علي", "دور علي", "ابحث عن", "ابحثلي عن", "شوفلي علي النت", "اسال جوجل", "في جوجل", "علي جوجل")) {
             val query = norm
                 .replace("دورلي علي", "")
@@ -164,16 +170,22 @@ object EgyptianColloquialNluParser {
                 .replace("علي جوجل", "")
                 .trim()
             if (query.isNotBlank()) {
-                val explicitGoogle = containsAny(norm, "جوجل", "النت")
-                return if (!explicitGoogle && contextState.activeAppContext == ActiveAppContext.YOUTUBE) {
-                    phonetic to EgyptianIntent.YouTubeSearchPlay(query)
-                } else {
-                    phonetic to EgyptianIntent.WebSearch(query)
+                val explicitBrowser = containsAny(norm, "جوجل", "google", "المتصفح", "افتح المتصفح")
+                return when {
+                    !explicitBrowser && contextState.activeAppContext == ActiveAppContext.YOUTUBE ->
+                        phonetic to EgyptianIntent.YouTubeSearchPlay(query)
+                    explicitBrowser ->
+                        phonetic to EgyptianIntent.WebSearch(query)
+                    else ->
+                        phonetic to EgyptianIntent.KnowledgeOrChatQuery(
+                            query = query,
+                            explicitlyRequestsOnlineSearch = true
+                        )
                 }
             }
         }
 
-        // Context follow-up: "افتحه تاني" / "دور تاني"
+        // Context follow-up: "افتحه تاني" / "كرر اخر امر"
         if (containsAny(norm, "افتحه تاني", "كرر اخر امر") && !contextState.lastOpenedApp.isNullOrBlank()) {
             return phonetic to EgyptianIntent.OpenApp(contextState.lastOpenedApp)
         }
@@ -293,7 +305,16 @@ object EgyptianColloquialNluParser {
                 return phonetic to EgyptianIntent.SmallTalkOrPersona("thanks")
         }
 
-        return phonetic to EgyptianIntent.Unknown(rawInput.trim())
+        // 13. General Knowledge / Conversational Question (routed to Optional Online Search / Local GGUF LLM)
+        if (startsWithAny(norm, *QUESTION_STARTERS.toTypedArray()) || rawInput.contains("؟") || rawInput.contains("?")) {
+            val wantsOnline = containsAny(norm, "اخبار", "الطقس", "سعر", "اليوم", "دلوقتي", "نت", "اونلاين", "معلومات عن")
+            return phonetic to EgyptianIntent.KnowledgeOrChatQuery(
+                query = strippedWake.trim(),
+                explicitlyRequestsOnlineSearch = wantsOnline
+            )
+        }
+
+        return phonetic to EgyptianIntent.Unknown(strippedWake.trim())
     }
 
     private fun checkHardEndLines(norm: String, phonetic: String): Pair<String, EgyptianIntent>? {

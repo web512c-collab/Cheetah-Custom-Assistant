@@ -6,6 +6,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -21,18 +22,18 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import com.example.R
-import com.example.controller.DeviceActionExecutor
-import com.example.controller.PermissionHealthChecker
+import com.example.core.model.AssistantGender
 import com.example.core.model.AssistantPipelineState
 import com.example.core.model.AssistantSettings
-import com.example.core.model.GuardrailVerdict
+import com.example.core.model.WakePipelineState
 import com.example.core.model.WakeWordSetupMode
 import com.example.data.ConversationMemoryStore
 import com.example.data.SettingsRepository
 import com.example.data.VoiceTemplateStore
-import com.example.guardrails.CommandGuardrailValidator
-import com.example.intelligence.EgyptianColloquialNluParser
+import com.example.intelligence.AssistantCommandProcessor
 import com.example.intelligence.JarvisEgyptianResponder
+import com.example.llm.LocalLlmManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -41,22 +42,25 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlin.math.max
 
 /**
- * Local Foreground Service (FOREGROUND_SERVICE_TYPE_MICROPHONE) that monitors 16kHz PCM
- * microphone audio continuously for the Egyptian Arabic wake phrase 'يا شيتا' using:
- * 1) The bundled offline CHKW v1 Int8 binary acoustic model (assets/models/cheetah_ya_sheeta_kws.bin)
- * 2) Optional user-enrolled MFCC-DTW templates & Voice Match speaker verification (VoiceTemplateStore)
+ * Local Foreground Service (FOREGROUND_SERVICE_TYPE_MICROPHONE) that continuously monitors
+ * 16kHz PCM microphone audio for the wake phrase even when minimized, swiped from recents,
+ * or with screen off.
  *
- * Operates 100% locally on-device with zero external network calls or API keys, and executes
- * the full hands-free post-wake STT -> NLU -> Guardrails -> Action -> TTS loop even when the
- * screen is off or UI is backgrounded.
+ * Reliability architecture (BUG A1 & BUG A2):
+ * - Deterministic 5-state machine (WakeStateMachine) logged to CheetahRuntimeBus.
+ * - Per-state watchdog timer + try/finally cycle cleanup guarantees automatic return to IDLE_WAKE_LISTENING.
+ * - Single-owner MicrophoneArbitrator prevents AudioRecord vs SpeechRecognizer hardware collisions.
+ * - AudioRecord dead-object/zero-read recovery counter + supervisor loop restart + AlarmManager watchdog.
  */
 class WakeWordDetectionService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var captureJob: Job? = null
+    private var captureSupervisorJob: Job? = null
+    private var watchdogJob: Job? = null
 
     private lateinit var settingsRepository: SettingsRepository
     private lateinit var templateStore: VoiceTemplateStore
@@ -65,12 +69,21 @@ class WakeWordDetectionService : Service() {
     private lateinit var wakeWordEngine: WakeWordEngine
     private lateinit var sttManager: EgyptianOfflineSttManager
     private lateinit var ttsManager: EgyptianTtsManager
+    private lateinit var localLlmManager: LocalLlmManager
+    private lateinit var commandProcessor: AssistantCommandProcessor
+
+    private val stateMachine = WakeStateMachine { entry ->
+        CheetahRuntimeBus.recordStateTransition(entry)
+    }
 
     @Volatile
     private var isMuted = false
 
     @Volatile
     private var diagnosticTestUntilMs = 0L
+
+    @Volatile
+    private var activeCycleJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -84,6 +97,9 @@ class WakeWordDetectionService : Service() {
 
         sttManager = EgyptianOfflineSttManager(applicationContext)
         ttsManager = EgyptianTtsManager(applicationContext)
+        localLlmManager = LocalLlmManager(applicationContext, settingsRepository)
+        commandProcessor = AssistantCommandProcessor(applicationContext, memoryStore, localLlmManager)
+
         createNotificationChannel()
 
         if (modelResult.isFailure) {
@@ -101,6 +117,7 @@ class WakeWordDetectionService : Service() {
             ACTION_STOP -> {
                 serviceScope.launch {
                     settingsRepository.setContinuousListening(false)
+                    WakeWatchdogReceiver.cancelWatchdog(applicationContext)
                     stopForegroundCompat()
                     stopSelf()
                 }
@@ -111,14 +128,15 @@ class WakeWordDetectionService : Service() {
                 isMuted = !isMuted
                 serviceScope.launch {
                     settingsRepository.setListeningMuted(isMuted)
+                    val s = settingsRepository.currentSettings()
+                    updateNotification(s)
                 }
                 CheetahRuntimeBus.updateDiagnostics {
                     it.copy(
                         wakeEngineStatus = if (isMuted) "MUTED" else activeEngineLabel(settingsRepository),
-                        lastAudioEvent = if (isMuted) "تم كتم المايك مؤقتاً" else "تم استئناف الاستماع لكلمة 'يا شيتا'"
+                        lastAudioEvent = if (isMuted) "تم كتم المايك مؤقتاً" else "تم استئناف الاستماع لكلمة التنبيه"
                     )
                 }
-                updateNotification()
                 return START_STICKY
             }
 
@@ -131,9 +149,9 @@ class WakeWordDetectionService : Service() {
             ACTION_RUN_DIAGNOSTIC_TEST -> {
                 diagnosticTestUntilMs = System.currentTimeMillis() + 5_500L
                 CheetahRuntimeBus.updateDiagnostics {
-                    it.copy(lastAudioEvent = "وضع الاختبار التشخيصي نشط لمدة 5 ثوانٍ — قل 'يا شيتا' الآن")
+                    it.copy(lastAudioEvent = "وضع الاختبار التشخيصي نشط لمدة 5 ثوانٍ — قل كلمة التنبيه الآن")
                 }
-                if (captureJob?.isActive == true) {
+                if (captureSupervisorJob?.isActive == true) {
                     return START_STICKY
                 }
             }
@@ -152,16 +170,615 @@ class WakeWordDetectionService : Service() {
             return START_NOT_STICKY
         }
 
+        startForegroundCompat(AssistantSettings())
         serviceScope.launch {
-            isMuted = settingsRepository.currentSettings().isListeningMuted
-            updateNotification()
+            val s = settingsRepository.currentSettings()
+            isMuted = s.isListeningMuted
+            ttsManager.applyVoicePreferences(s.voiceGender, s.selectedTtsVoiceName)
+            updateNotification(s)
         }
 
-        startForegroundCompat()
         CheetahRuntimeBus.setServiceRunning(true)
-        CheetahRuntimeBus.updatePipelineState(AssistantPipelineState.LISTENING_WAKE_WORD)
-        startAcousticMonitorLoop()
+        stateMachine.forceResetToIdle("service_started", isError = false)
+        WakeWatchdogReceiver.schedulePeriodicWatchdog(applicationContext)
+        startWatchdogLoop()
+        startAcousticSupervisorLoop()
         return START_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        val appCtx = applicationContext
+        serviceScope.launch {
+            val s = settingsRepository.currentSettings()
+            if (s.continuousListeningEnabled && !s.isListeningMuted) {
+                WakeWatchdogReceiver.scheduleImmediateRestart(appCtx, delayMs = 1_200L)
+            }
+        }
+    }
+
+    private fun startWatchdogLoop() {
+        if (watchdogJob?.isActive == true) return
+        watchdogJob = serviceScope.launch {
+            while (isActive) {
+                delay(1_000L)
+                val timedOut = stateMachine.checkWatchdog(llmActive = localLlmManager.isModelLoaded())
+                if (timedOut) {
+                    CheetahRuntimeBus.incrementWatchdogTimeouts()
+                    CheetahRuntimeBus.updateDiagnostics {
+                        it.copy(lastError = "Watchdog استعاد حالة الاستماع تلقائياً بعد انتهاء المهلة")
+                    }
+                    runCatching { sttManager.stopAndRelease() }
+                    runCatching { ttsManager.stop() }
+                    runCatching { localLlmManager.cancelGeneration() }
+                    activeCycleJob?.cancel(CancellationException("State machine watchdog timeout"))
+                }
+            }
+        }
+    }
+
+    private fun startAcousticSupervisorLoop() {
+        if (captureSupervisorJob?.isActive == true) return
+        captureSupervisorJob = serviceScope.launch {
+            var crashRestarts = 0
+            try {
+                while (isActive) {
+                    try {
+                        runAcousticMonitorSession()
+                        if (!isActive) break
+                        delay(500L)
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (t: Throwable) {
+                        crashRestarts++
+                        CheetahRuntimeBus.incrementAudioRecordRecoveries()
+                        CheetahRuntimeBus.updateDiagnostics {
+                            it.copy(
+                                audioRecordStatus = "RECOVERING",
+                                lastError = "استعادة تلقائية بعد خطأ في حلقة الصوت (#$crashRestarts): ${t.message ?: "error"}"
+                            )
+                        }
+                        stateMachine.forceResetToIdle("capture_supervisor_recover:$crashRestarts", isError = true)
+                        delay((500L * crashRestarts.coerceAtMost(6)).coerceAtMost(3_000L))
+                    }
+                }
+            } finally {
+                MicrophoneArbitrator.releaseWakeAudioRecordIfHeld()
+                CheetahRuntimeBus.setServiceRunning(false)
+            }
+        }
+    }
+
+    private suspend fun runAcousticMonitorSession() {
+        val sampleRate = AudioFeatureExtractor.SAMPLE_RATE
+        val chunkSamples = 640 // 40ms chunks at 16kHz
+        val maxRingSamples = (sampleRate * 2.5f).toInt()
+        val ringBuffer = ShortArray(maxRingSamples)
+        var ringCursor = 0
+        val chunk = ShortArray(chunkSamples)
+
+        var recorder: AudioRecord? = null
+        var audioSourceLabel = "NONE"
+
+        var noiseFloorRms = 0.012f
+        var calibrationFrames = 0
+        var inSpeech = false
+        var speechStartCursor = 0
+        var speechSamplesCount = 0
+        var silenceFrames = 0
+        var peakUtteranceRms = 0f
+        var cooldownUntilMs = 0L
+        var consecutiveReadErrors = 0
+        var initFailCount = 0
+
+        try {
+            while (serviceScope.isActive) {
+                val settings = settingsRepository.currentSettings()
+                isMuted = settings.isListeningMuted
+                ttsManager.applyVoicePreferences(settings.voiceGender, settings.selectedTtsVoiceName)
+
+                val shouldYield = isMuted ||
+                    CheetahRuntimeBus.isSttActive.value ||
+                    MicrophoneArbitrator.yieldWakeForForeground.value ||
+                    stateMachine.currentState != WakePipelineState.IDLE_WAKE_LISTENING
+
+                if (shouldYield) {
+                    if (recorder != null) {
+                        releaseRecorderSafely(recorder)
+                        recorder = null
+                    }
+                    MicrophoneArbitrator.releaseWakeAudioRecordIfHeld()
+                    CheetahRuntimeBus.updateMicLevel(0f)
+                    CheetahRuntimeBus.updateDiagnostics {
+                        it.copy(
+                            audioRecordStatus = if (isMuted) "MUTED" else "YIELDED",
+                            wakeEngineStatus = if (isMuted) "MUTED" else "HANDOFF"
+                        )
+                    }
+                    delay(150L)
+                    continue
+                }
+
+                if (recorder == null) {
+                    if (!MicrophoneArbitrator.tryMarkWakeAudioRecordActive()) {
+                        delay(120L)
+                        continue
+                    }
+                    val (newRec, label) = openAudioRecord()
+                    if (newRec == null) {
+                        MicrophoneArbitrator.releaseWakeAudioRecordIfHeld()
+                        initFailCount++
+                        CheetahRuntimeBus.incrementAudioRecordRecoveries()
+                        CheetahRuntimeBus.updatePipelineState(AssistantPipelineState.ERROR)
+                        CheetahRuntimeBus.updateDiagnostics {
+                            it.copy(
+                                audioRecordStatus = "INIT_FAILED",
+                                audioSourceUsed = "NONE",
+                                lastError = "تعذر تهيئة AudioRecord (محاولة #$initFailCount — قد يكون المايك مستخدماً)"
+                            )
+                        }
+                        delay((1_000L * initFailCount.coerceAtMost(5)).coerceAtMost(5_000L))
+                        continue
+                    }
+
+                    val startedOk = runCatching {
+                        newRec.startRecording()
+                        newRec.recordingState == AudioRecord.RECORDSTATE_RECORDING
+                    }.getOrDefault(false)
+
+                    if (!startedOk) {
+                        releaseRecorderSafely(newRec)
+                        MicrophoneArbitrator.releaseWakeAudioRecordIfHeld()
+                        CheetahRuntimeBus.incrementAudioRecordRecoveries()
+                        delay(800L)
+                        continue
+                    }
+
+                    initFailCount = 0
+                    consecutiveReadErrors = 0
+                    recorder = newRec
+                    audioSourceLabel = label
+                    CheetahRuntimeBus.updateDiagnostics {
+                        it.copy(
+                            audioRecordStatus = "RECORDING",
+                            audioSourceUsed = audioSourceLabel,
+                            sampleRateHz = sampleRate,
+                            wakeEngineStatus = activeEngineLabel(settings),
+                            modelStatus = buildModelStatusLabel(),
+                            detectionThreshold = wakeWordEngine.sensitivityToDtwThreshold(settings.wakeSensitivity),
+                            lastError = null
+                        )
+                    }
+                }
+
+                val rec = recorder
+                val read = runCatching { rec.read(chunk, 0, chunk.size) }.getOrElse { -1 }
+                if (read <= 0) {
+                    consecutiveReadErrors++
+                    if (consecutiveReadErrors >= 4 || read == AudioRecord.ERROR_DEAD_OBJECT) {
+                        releaseRecorderSafely(rec)
+                        recorder = null
+                        MicrophoneArbitrator.releaseWakeAudioRecordIfHeld()
+                        CheetahRuntimeBus.incrementAudioRecordRecoveries()
+                        CheetahRuntimeBus.updateDiagnostics {
+                            it.copy(
+                                audioRecordStatus = "RECOVERING",
+                                lastAudioEvent = "استعادة AudioRecord بعد انقطاع القراءة (code=$read)"
+                            )
+                        }
+                        calibrationFrames = 0
+                        inSpeech = false
+                        delay(350L)
+                    } else {
+                        delay(35L)
+                    }
+                    continue
+                }
+                consecutiveReadErrors = 0
+
+                for (i in 0 until read) {
+                    ringBuffer[ringCursor] = chunk[i]
+                    ringCursor = (ringCursor + 1) % maxRingSamples
+                }
+
+                val rms = AudioFeatureExtractor.computeRms(chunk, read)
+                CheetahRuntimeBus.updateMicLevel((rms * 5.0f).coerceIn(0f, 1f))
+
+                if (calibrationFrames < 12) {
+                    noiseFloorRms = if (calibrationFrames == 0) rms else (noiseFloorRms * 0.7f + rms * 0.3f)
+                    calibrationFrames++
+                    continue
+                }
+
+                val sensitivityScale = (1.30f - settings.wakeSensitivity.coerceIn(0.2f, 0.95f) * 0.50f)
+                val vadThreshold = (max(0.014f, noiseFloorRms * 2.25f) * sensitivityScale)
+                    .coerceIn(0.012f, 0.085f)
+
+                if (!inSpeech) {
+                    if (rms > vadThreshold) {
+                        inSpeech = true
+                        val preRoll = 3200
+                        speechStartCursor = (ringCursor - read - preRoll + maxRingSamples) % maxRingSamples
+                        speechSamplesCount = preRoll + read
+                        silenceFrames = 0
+                        peakUtteranceRms = rms
+                    } else {
+                        noiseFloorRms = (noiseFloorRms * 0.96f) + (rms * 0.04f)
+                        CheetahRuntimeBus.updateDiagnostics {
+                            it.copy(
+                                ambientNoiseRms = noiseFloorRms,
+                                detectionThreshold = wakeWordEngine.sensitivityToDtwThreshold(settings.wakeSensitivity)
+                            )
+                        }
+                    }
+                } else {
+                    speechSamplesCount += read
+                    if (rms > peakUtteranceRms) peakUtteranceRms = rms
+
+                    if (rms <= vadThreshold * 0.85f) {
+                        silenceFrames++
+                    } else {
+                        silenceFrames = 0
+                    }
+
+                    val maxUtteranceSamples = (sampleRate * 2.2f).toInt()
+                    if (silenceFrames >= 7 || speechSamplesCount >= maxUtteranceSamples) {
+                        val capturedSamples = speechSamplesCount.coerceAtMost(maxRingSamples)
+                        inSpeech = false
+                        silenceFrames = 0
+                        speechSamplesCount = 0
+
+                        if (capturedSamples >= (sampleRate * 0.24f).toInt() &&
+                            System.currentTimeMillis() > cooldownUntilMs
+                        ) {
+                            val utterance = ShortArray(capturedSamples)
+                            for (i in 0 until capturedSamples) {
+                                utterance[i] = ringBuffer[(speechStartCursor + i) % maxRingSamples]
+                            }
+
+                            val isDiagnosticRun = System.currentTimeMillis() <= diagnosticTestUntilMs
+                            val mfccCount = templateStore.samples.value.count { it.mfccSequence.isNotEmpty() }
+                            val canRunAcousticModel = mfccCount > 0 ||
+                                (bundledModel != null && wakeWordEngine.isUsingDefaultYaSheetaPhrase(settings))
+
+                            if (canRunAcousticModel) {
+                                val evalResult = wakeWordEngine.evaluate(
+                                    pcmUtterance = utterance,
+                                    noiseFloorRms = noiseFloorRms,
+                                    settings = settings
+                                )
+                                CheetahRuntimeBus.updateDiagnostics {
+                                    it.copy(
+                                        lastConfidence = evalResult.wakeConfidence,
+                                        lastVoiceMatchScore = evalResult.voiceMatchScore,
+                                        lastVoiceMatchResult = when {
+                                            evalResult.voiceMatchScore == null -> "غير متاح"
+                                            evalResult.voiceMatchPassed -> "مطابق"
+                                            evalResult.usedLowConfidenceFallback -> "بديل المالك الآمن"
+                                            else -> "مرفوض"
+                                        },
+                                        lastAudioEvent = evalResult.diagnosticSummary,
+                                        detectionThreshold = evalResult.thresholdUsed,
+                                        ambientNoiseRms = noiseFloorRms,
+                                        wakeEngineStatus = activeEngineLabel(settings)
+                                    )
+                                }
+
+                                if (evalResult.detected && !isDiagnosticRun) {
+                                    cooldownUntilMs = System.currentTimeMillis() + 2_500L
+                                    releaseRecorderSafely(rec)
+                                    recorder = null
+                                    MicrophoneArbitrator.releaseWakeAudioRecordIfHeld()
+
+                                    runGuardedWakeCycle(
+                                        settings = settings,
+                                        wakeConfidence = evalResult.wakeConfidence,
+                                        voiceMatchScore = evalResult.voiceMatchScore,
+                                        voiceMatchPassed = evalResult.voiceMatchPassed || evalResult.usedLowConfidenceFallback,
+                                        sourceTag = evalResult.detectionSource,
+                                        directCommandText = null
+                                    )
+                                    calibrationFrames = 0
+                                }
+                            } else if (settings.wakeSetupMode == WakeWordSetupMode.TEXT_TYPED &&
+                                peakUtteranceRms > max(0.028f, noiseFloorRms * 3.0f) &&
+                                capturedSamples >= (sampleRate * 0.45f).toInt() &&
+                                !isDiagnosticRun
+                            ) {
+                                cooldownUntilMs = System.currentTimeMillis() + 4_000L
+                                releaseRecorderSafely(rec)
+                                recorder = null
+                                MicrophoneArbitrator.releaseWakeAudioRecordIfHeld()
+
+                                verifyTextWakeViaStt(settings)
+                                calibrationFrames = 0
+                            } else {
+                                CheetahRuntimeBus.updateDiagnostics {
+                                    it.copy(
+                                        lastAudioEvent = "سجل بصمة صوتية لكلمة التنبيه أو استخدم 'يا شيتا' للنموذج المدمج",
+                                        ambientNoiseRms = noiseFloorRms
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } finally {
+            releaseRecorderSafely(recorder)
+            MicrophoneArbitrator.releaseWakeAudioRecordIfHeld()
+        }
+    }
+
+    private suspend fun verifyTextWakeViaStt(settings: AssistantSettings) {
+        CheetahRuntimeBus.updateDiagnostics {
+            it.copy(
+                audioRecordStatus = "PAUSED_FOR_STT",
+                wakeEngineStatus = "VERIFYING_TEXT_WAKE",
+                lastAudioEvent = "التحقق النصي من كلمة التنبيه..."
+            )
+        }
+        val sttResult = MicrophoneArbitrator.withMicAccess(MicOwner.WAKE_TEXT_STT) {
+            sttManager.listenOnce(timeoutMs = 5_000L)
+        }
+        val transcript = sttResult.getOrNull()?.trim().orEmpty()
+        if (transcript.isEmpty()) {
+            CheetahRuntimeBus.updateDiagnostics {
+                it.copy(
+                    lastAudioEvent = sttResult.exceptionOrNull()?.message ?: "لم يتم التعرف على كلمة التنبيه"
+                )
+            }
+            return
+        }
+
+        if (!EgyptianPhoneticNormalizer.matchesWakePhrase(transcript, settings.wakePhrase, settings.wakeSensitivity)) {
+            CheetahRuntimeBus.incrementFalseActivation()
+            CheetahRuntimeBus.updateDiagnostics {
+                it.copy(lastAudioEvent = "كلام عابر لم يطابق اسم التنبيه (${settings.wakePhrase})")
+            }
+            return
+        }
+
+        val trailingCommand = EgyptianPhoneticNormalizer.stripWakePhrase(transcript, settings.wakePhrase)
+        val hasDirectCommand = trailingCommand.isNotBlank() &&
+            EgyptianPhoneticNormalizer.normalizeForNlu(trailingCommand) !=
+            EgyptianPhoneticNormalizer.normalizeForNlu(transcript)
+
+        runGuardedWakeCycle(
+            settings = settings,
+            wakeConfidence = 0.85f,
+            voiceMatchScore = null,
+            voiceMatchPassed = true,
+            sourceTag = "FOREGROUND_TEXT_STT_MATCH",
+            directCommandText = if (hasDirectCommand) trailingCommand else null
+        )
+    }
+
+    /**
+     * Executes a complete wake -> ack -> STT -> NLU/Guardrail/LLM/Search -> TTS cycle
+     * wrapped in a hard timeout + try/finally cleanup so the service can NEVER freeze after one reply.
+     */
+    private suspend fun runGuardedWakeCycle(
+        settings: AssistantSettings,
+        wakeConfidence: Float,
+        voiceMatchScore: Float?,
+        voiceMatchPassed: Boolean,
+        sourceTag: String,
+        directCommandText: String?
+    ) {
+        val hasModelConfigured = localLlmManager.isModelLoaded() ||
+            (settings.localLlmConfig.useAiForGeneral && localLlmManager.hasConfiguredModel(settings.localLlmConfig))
+        val cycleBudgetMs = if (hasModelConfigured) {
+            ((settings.localLlmConfig.maxThinkingSeconds.coerceIn(5, 120) + 28) * 1000L)
+        } else {
+            38_000L
+        }
+        val job = serviceScope.launch {
+            try {
+                withTimeout(cycleBudgetMs) {
+                    executeWakeAndCommandCycle(
+                        settings = settings,
+                        wakeConfidence = wakeConfidence,
+                        voiceMatchScore = voiceMatchScore,
+                        voiceMatchPassed = voiceMatchPassed,
+                        sourceTag = sourceTag,
+                        directCommandText = directCommandText
+                    )
+                }
+            } catch (ce: CancellationException) {
+                CheetahRuntimeBus.updateDiagnostics {
+                    it.copy(lastAudioEvent = "تم إلغاء دورة الأمر أو انتهت المهلة")
+                }
+                if (ce !is kotlinx.coroutines.TimeoutCancellationException && !serviceScope.isActive) {
+                    throw ce
+                }
+            } catch (t: Throwable) {
+                CheetahRuntimeBus.updateDiagnostics {
+                    it.copy(lastError = "خطأ أثناء معالجة الأمر: ${t.message ?: "error"}")
+                }
+            } finally {
+                runCatching { sttManager.stopAndRelease() }
+                runCatching { ttsManager.stop() }
+                CheetahRuntimeBus.setStreamingReplyText("")
+                CheetahRuntimeBus.updateMicLevel(0f)
+                stateMachine.forceResetToIdle("cycle_completed_cleanup", isError = false)
+            }
+        }
+        activeCycleJob = job
+        job.join()
+        activeCycleJob = null
+    }
+
+    private suspend fun executeWakeAndCommandCycle(
+        settings: AssistantSettings,
+        wakeConfidence: Float,
+        voiceMatchScore: Float?,
+        voiceMatchPassed: Boolean,
+        sourceTag: String,
+        directCommandText: String?
+    ) {
+        vibratePulse()
+        CheetahRuntimeBus.emitWakeTrigger(
+            WakeTriggerEvent(
+                timestampMs = System.currentTimeMillis(),
+                wakeConfidence = wakeConfidence,
+                voiceMatchScore = voiceMatchScore,
+                passedVoiceMatch = voiceMatchPassed,
+                source = sourceTag
+            )
+        )
+
+        stateMachine.transition(WakePipelineState.WAKE_DETECTED, "wake_triggered:$sourceTag")
+
+        val commandText: String = if (!directCommandText.isNullOrBlank()) {
+            directCommandText
+        } else {
+            val ackText = JarvisEgyptianResponder.formatWakeAck(settings)
+            ttsManager.speakAndAwait(
+                text = ackText,
+                rate = settings.ttsSpeechRate,
+                pitch = settings.ttsPitch,
+                voiceGender = settings.voiceGender,
+                selectedVoiceName = settings.selectedTtsVoiceName,
+                timeoutMs = 3_800L
+            )
+            delay(150L)
+
+            stateMachine.transition(WakePipelineState.COMMAND_LISTENING, "listening_for_command_stt")
+            val sttResult = MicrophoneArbitrator.withMicAccess(MicOwner.WAKE_COMMAND_STT) {
+                sttManager.listenOnce(
+                    timeoutMs = 10_000L,
+                    onRmsDb = { CheetahRuntimeBus.updateMicLevel(it) }
+                )
+            }
+
+            val captured = sttResult.getOrNull()?.trim()
+            if (captured.isNullOrEmpty()) {
+                val errMsg = sttResult.exceptionOrNull()?.message ?: "ماسمعتش أمر واضح يا فندم."
+                CheetahRuntimeBus.updateDiagnostics { it.copy(lastError = errMsg) }
+                stateMachine.transition(WakePipelineState.SPEAKING, "speak_stt_retry_prompt", isError = true)
+                ttsManager.speakAndAwait(
+                    text = errMsg,
+                    rate = settings.ttsSpeechRate,
+                    pitch = settings.ttsPitch,
+                    voiceGender = settings.voiceGender,
+                    selectedVoiceName = settings.selectedTtsVoiceName,
+                    timeoutMs = 5_000L
+                )
+                return
+            }
+            captured
+        }
+
+        stateMachine.transition(WakePipelineState.PROCESSING, "process_command")
+        var streamedChars = 0
+        var streamedSentences = 0
+        val outcome = commandProcessor.process(
+            rawInput = commandText,
+            settings = settings,
+            voiceMatchPassed = voiceMatchPassed,
+            voiceMatchScore = voiceMatchScore,
+            clipboardTextProvider = {
+                runCatching {
+                    val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                    cm?.primaryClip?.getItemAt(0)?.coerceToText(applicationContext)?.toString()
+                }.getOrNull()
+            },
+            onStopSpeech = {
+                runCatching { ttsManager.stop() }
+            },
+            onStreamingSentence = { sentence, isFirst ->
+                if (streamedSentences < 3 && streamedChars < 240) {
+                    streamedSentences++
+                    streamedChars += sentence.length
+                    ttsManager.enqueueStreamingSentence(
+                        sentence = sentence,
+                        rate = settings.ttsSpeechRate,
+                        pitch = settings.ttsPitch,
+                        voiceGender = settings.voiceGender,
+                        selectedVoiceName = settings.selectedTtsVoiceName,
+                        isFirstChunk = isFirst
+                    )
+                }
+            }
+        )
+
+        stateMachine.transition(WakePipelineState.SPEAKING, "speak_reply:${outcome.intentCategory}")
+        if (outcome.wasInterrupted) {
+            ttsManager.speakAndAwait(
+                text = outcome.spokenReplyAr,
+                rate = settings.ttsSpeechRate,
+                pitch = settings.ttsPitch,
+                voiceGender = settings.voiceGender,
+                selectedVoiceName = settings.selectedTtsVoiceName,
+                timeoutMs = 3_500L
+            )
+        } else if (outcome.streamedViaTts) {
+            if (outcome.hasContinuation) {
+                ttsManager.enqueueStreamingSentence(
+                    sentence = "تحب أكمل الباقي؟",
+                    rate = settings.ttsSpeechRate,
+                    pitch = settings.ttsPitch,
+                    voiceGender = settings.voiceGender,
+                    selectedVoiceName = settings.selectedTtsVoiceName,
+                    isFirstChunk = false
+                )
+            }
+            val waitDeadline = System.currentTimeMillis() + 12_000L
+            while (ttsManager.isSpeaking.value && System.currentTimeMillis() < waitDeadline) {
+                delay(180L)
+            }
+        } else {
+            ttsManager.speakAndAwait(
+                text = outcome.spokenReplyAr,
+                rate = settings.ttsSpeechRate,
+                pitch = settings.ttsPitch,
+                voiceGender = settings.voiceGender,
+                selectedVoiceName = settings.selectedTtsVoiceName,
+                timeoutMs = 12_000L
+            )
+        }
+        delay(220L)
+    }
+
+    private fun releaseRecorderSafely(recorder: AudioRecord?) {
+        if (recorder == null) return
+        runCatching {
+            if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                recorder.stop()
+            }
+        }
+        runCatching { recorder.release() }
+    }
+
+    private fun openAudioRecord(): Pair<AudioRecord?, String> {
+        val sampleRate = AudioFeatureExtractor.SAMPLE_RATE
+        val minBuf = AudioRecord.getMinBufferSize(
+            sampleRate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        ).coerceAtLeast(2048)
+
+        val candidates = listOf(
+            MediaRecorder.AudioSource.VOICE_RECOGNITION to "VOICE_RECOGNITION",
+            MediaRecorder.AudioSource.MIC to "MIC"
+        )
+        for ((source, label) in candidates) {
+            val rec = runCatching {
+                AudioRecord(
+                    source,
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    minBuf * 3
+                )
+            }.getOrNull()
+            if (rec != null && rec.state == AudioRecord.STATE_INITIALIZED) {
+                return rec to label
+            }
+            rec?.release()
+        }
+        return null to "NONE"
     }
 
     private fun buildModelStatusLabel(): String {
@@ -209,411 +826,6 @@ class WakeWordDetectionService : Service() {
         }
     }
 
-    private fun openAudioRecord(): Pair<AudioRecord?, String> {
-        val sampleRate = AudioFeatureExtractor.SAMPLE_RATE
-        val minBuf = AudioRecord.getMinBufferSize(
-            sampleRate,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
-        ).coerceAtLeast(2048)
-
-        val candidates = listOf(
-            MediaRecorder.AudioSource.VOICE_RECOGNITION to "VOICE_RECOGNITION",
-            MediaRecorder.AudioSource.MIC to "MIC"
-        )
-        for ((source, label) in candidates) {
-            val rec = runCatching {
-                AudioRecord(
-                    source,
-                    sampleRate,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    minBuf * 3
-                )
-            }.getOrNull()
-            if (rec != null && rec.state == AudioRecord.STATE_INITIALIZED) {
-                return rec to label
-            }
-            rec?.release()
-        }
-        return null to "NONE"
-    }
-
-    private fun startAcousticMonitorLoop() {
-        if (captureJob?.isActive == true) return
-        captureJob = serviceScope.launch {
-            val sampleRate = AudioFeatureExtractor.SAMPLE_RATE
-            val chunkSamples = 640 // 40ms chunks at 16kHz
-            val maxRingSamples = (sampleRate * 2.5f).toInt()
-            val ringBuffer = ShortArray(maxRingSamples)
-            var ringCursor = 0
-            val chunk = ShortArray(chunkSamples)
-
-            var recorder: AudioRecord? = null
-            var audioSourceLabel = "NONE"
-
-            var noiseFloorRms = 0.012f
-            var calibrationFrames = 0
-            var inSpeech = false
-            var speechStartCursor = 0
-            var speechSamplesCount = 0
-            var silenceFrames = 0
-            var peakUtteranceRms = 0f
-            var cooldownUntilMs = 0L
-
-            try {
-                while (isActive) {
-                    val settings = settingsRepository.currentSettings()
-                    isMuted = settings.isListeningMuted
-
-                    if (isMuted || CheetahRuntimeBus.isSttActive.value) {
-                        recorder?.let { rec ->
-                            runCatching { rec.stop() }
-                            rec.release()
-                        }
-                        recorder = null
-                        CheetahRuntimeBus.updateMicLevel(0f)
-                        CheetahRuntimeBus.updateDiagnostics {
-                            it.copy(
-                                audioRecordStatus = if (isMuted) "MUTED" else "PAUSED_FOR_STT",
-                                wakeEngineStatus = if (isMuted) "MUTED" else "HANDOFF_STT"
-                            )
-                        }
-                        delay(160)
-                        continue
-                    }
-
-                    if (recorder == null) {
-                        val (newRec, label) = openAudioRecord()
-                        if (newRec == null) {
-                            CheetahRuntimeBus.updatePipelineState(AssistantPipelineState.ERROR)
-                            CheetahRuntimeBus.updateDiagnostics {
-                                it.copy(
-                                    audioRecordStatus = "INIT_FAILED",
-                                    audioSourceUsed = "NONE",
-                                    lastError = "تعذر تهيئة AudioRecord (قد يكون المايك مستخدماً من تطبيق آخر)"
-                                )
-                            }
-                            delay(2000)
-                            continue
-                        }
-                        recorder = newRec
-                        audioSourceLabel = label
-                        runCatching { newRec.startRecording() }
-                        CheetahRuntimeBus.updateDiagnostics {
-                            it.copy(
-                                audioRecordStatus = "RECORDING",
-                                audioSourceUsed = audioSourceLabel,
-                                sampleRateHz = sampleRate,
-                                wakeEngineStatus = activeEngineLabel(settings),
-                                modelStatus = buildModelStatusLabel(),
-                                detectionThreshold = wakeWordEngine.sensitivityToDtwThreshold(settings.wakeSensitivity),
-                                lastError = null
-                            )
-                        }
-                    }
-
-                    val rec = recorder!!
-                    val read = rec.read(chunk, 0, chunk.size)
-                    if (read <= 0) {
-                        delay(30)
-                        continue
-                    }
-
-                    for (i in 0 until read) {
-                        ringBuffer[ringCursor] = chunk[i]
-                        ringCursor = (ringCursor + 1) % maxRingSamples
-                    }
-
-                    val rms = AudioFeatureExtractor.computeRms(chunk, read)
-                    CheetahRuntimeBus.updateMicLevel((rms * 5.0f).coerceIn(0f, 1f))
-
-                    if (calibrationFrames < 12) {
-                        noiseFloorRms = if (calibrationFrames == 0) rms else (noiseFloorRms * 0.7f + rms * 0.3f)
-                        calibrationFrames++
-                        continue
-                    }
-
-                    val sensitivityScale = (1.30f - settings.wakeSensitivity.coerceIn(0.2f, 0.95f) * 0.50f)
-                    val vadThreshold = (max(0.014f, noiseFloorRms * 2.25f) * sensitivityScale)
-                        .coerceIn(0.012f, 0.085f)
-
-                    if (!inSpeech) {
-                        if (rms > vadThreshold) {
-                            inSpeech = true
-                            val preRoll = 3200 // ~200ms pre-roll
-                            speechStartCursor = (ringCursor - read - preRoll + maxRingSamples) % maxRingSamples
-                            speechSamplesCount = preRoll + read
-                            silenceFrames = 0
-                            peakUtteranceRms = rms
-                        } else {
-                            noiseFloorRms = (noiseFloorRms * 0.96f) + (rms * 0.04f)
-                            CheetahRuntimeBus.updateDiagnostics {
-                                it.copy(
-                                    ambientNoiseRms = noiseFloorRms,
-                                    detectionThreshold = wakeWordEngine.sensitivityToDtwThreshold(settings.wakeSensitivity)
-                                )
-                            }
-                        }
-                    } else {
-                        speechSamplesCount += read
-                        if (rms > peakUtteranceRms) peakUtteranceRms = rms
-
-                        if (rms <= vadThreshold * 0.85f) {
-                            silenceFrames++
-                        } else {
-                            silenceFrames = 0
-                        }
-
-                        val maxUtteranceSamples = (sampleRate * 2.2f).toInt()
-                        if (silenceFrames >= 7 || speechSamplesCount >= maxUtteranceSamples) {
-                            val capturedSamples = speechSamplesCount.coerceAtMost(maxRingSamples)
-                            inSpeech = false
-                            silenceFrames = 0
-                            speechSamplesCount = 0
-
-                            if (capturedSamples >= (sampleRate * 0.24f).toInt() &&
-                                System.currentTimeMillis() > cooldownUntilMs
-                            ) {
-                                val utterance = ShortArray(capturedSamples)
-                                for (i in 0 until capturedSamples) {
-                                    utterance[i] = ringBuffer[(speechStartCursor + i) % maxRingSamples]
-                                }
-
-                                val isDiagnosticRun = System.currentTimeMillis() <= diagnosticTestUntilMs
-                                val mfccCount = templateStore.samples.value.count { it.mfccSequence.isNotEmpty() }
-                                val canRunAcousticModel = mfccCount > 0 ||
-                                    (bundledModel != null && wakeWordEngine.isUsingDefaultYaSheetaPhrase(settings))
-
-                                if (canRunAcousticModel) {
-                                    val evalResult = wakeWordEngine.evaluate(
-                                        pcmUtterance = utterance,
-                                        noiseFloorRms = noiseFloorRms,
-                                        settings = settings
-                                    )
-                                    CheetahRuntimeBus.updateDiagnostics {
-                                        it.copy(
-                                            lastConfidence = evalResult.wakeConfidence,
-                                            lastVoiceMatchScore = evalResult.voiceMatchScore,
-                                            lastVoiceMatchResult = when {
-                                                evalResult.voiceMatchScore == null -> "غير متاح"
-                                                evalResult.voiceMatchPassed -> "مطابق"
-                                                evalResult.usedLowConfidenceFallback -> "بديل المالك الآمن"
-                                                else -> "مرفوض"
-                                            },
-                                            lastAudioEvent = evalResult.diagnosticSummary,
-                                            detectionThreshold = evalResult.thresholdUsed,
-                                            ambientNoiseRms = noiseFloorRms,
-                                            wakeEngineStatus = activeEngineLabel(settings)
-                                        )
-                                    }
-
-                                    if (evalResult.detected && !isDiagnosticRun) {
-                                        cooldownUntilMs = System.currentTimeMillis() + 3000L
-                                        runCatching { rec.stop() }
-                                        rec.release()
-                                        recorder = null
-
-                                        handleWakeAndCommandCycle(
-                                            settings = settings,
-                                            wakeConfidence = evalResult.wakeConfidence,
-                                            voiceMatchScore = evalResult.voiceMatchScore,
-                                            voiceMatchPassed = evalResult.voiceMatchPassed || evalResult.usedLowConfidenceFallback,
-                                            sourceTag = evalResult.detectionSource,
-                                            directCommandText = null
-                                        )
-                                        calibrationFrames = 0
-                                    }
-                                } else if (settings.wakeSetupMode == WakeWordSetupMode.TEXT_TYPED &&
-                                    peakUtteranceRms > max(0.028f, noiseFloorRms * 3.0f) &&
-                                    capturedSamples >= (sampleRate * 0.45f).toInt() &&
-                                    !isDiagnosticRun
-                                ) {
-                                    cooldownUntilMs = System.currentTimeMillis() + 4500L
-                                    runCatching { rec.stop() }
-                                    rec.release()
-                                    recorder = null
-
-                                    verifyTextWakeViaStt(settings)
-                                    calibrationFrames = 0
-                                } else {
-                                    CheetahRuntimeBus.updateDiagnostics {
-                                        it.copy(
-                                            lastAudioEvent = "سجل بصمة صوتية لكلمة التنبيه أو استخدم 'يا شيتا' للنموذج المدمج",
-                                            ambientNoiseRms = noiseFloorRms
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } finally {
-                runCatching { recorder?.stop() }
-                recorder?.release()
-                CheetahRuntimeBus.setServiceRunning(false)
-            }
-        }
-    }
-
-    private suspend fun verifyTextWakeViaStt(settings: AssistantSettings) {
-        CheetahRuntimeBus.updateDiagnostics {
-            it.copy(
-                audioRecordStatus = "PAUSED_FOR_STT",
-                wakeEngineStatus = "VERIFYING_TEXT_WAKE",
-                lastAudioEvent = "التحقق النصي من كلمة التنبيه..."
-            )
-        }
-        val sttResult = sttManager.listenOnce(timeoutMs = 5_000L)
-        val transcript = sttResult.getOrNull()?.trim().orEmpty()
-        if (transcript.isEmpty()) {
-            CheetahRuntimeBus.updateDiagnostics {
-                it.copy(
-                    lastAudioEvent = sttResult.exceptionOrNull()?.message ?: "لم يتم التعرف على كلمة التنبيه"
-                )
-            }
-            return
-        }
-
-        if (!EgyptianPhoneticNormalizer.matchesWakePhrase(transcript, settings.wakePhrase, settings.wakeSensitivity)) {
-            CheetahRuntimeBus.incrementFalseActivation()
-            CheetahRuntimeBus.updateDiagnostics {
-                it.copy(lastAudioEvent = "كلام عابر لم يطابق اسم التنبيه (${settings.wakePhrase})")
-            }
-            return
-        }
-
-        val trailingCommand = EgyptianPhoneticNormalizer.stripWakePhrase(transcript, settings.wakePhrase)
-        val hasDirectCommand = trailingCommand.isNotBlank() &&
-            EgyptianPhoneticNormalizer.normalizeForNlu(trailingCommand) !=
-            EgyptianPhoneticNormalizer.normalizeForNlu(transcript)
-
-        handleWakeAndCommandCycle(
-            settings = settings,
-            wakeConfidence = 0.85f,
-            voiceMatchScore = null,
-            voiceMatchPassed = true,
-            sourceTag = "FOREGROUND_TEXT_STT_MATCH",
-            directCommandText = if (hasDirectCommand) trailingCommand else null
-        )
-    }
-
-    private suspend fun handleWakeAndCommandCycle(
-        settings: AssistantSettings,
-        wakeConfidence: Float,
-        voiceMatchScore: Float?,
-        voiceMatchPassed: Boolean,
-        sourceTag: String,
-        directCommandText: String?
-    ) {
-        vibratePulse()
-        CheetahRuntimeBus.emitWakeTrigger(
-            WakeTriggerEvent(
-                timestampMs = System.currentTimeMillis(),
-                wakeConfidence = wakeConfidence,
-                voiceMatchScore = voiceMatchScore,
-                passedVoiceMatch = voiceMatchPassed,
-                source = sourceTag
-            )
-        )
-
-        val commandText = if (!directCommandText.isNullOrBlank()) {
-            directCommandText
-        } else {
-            CheetahRuntimeBus.updatePipelineState(AssistantPipelineState.WAKE_ACKNOWLEDGED)
-            ttsManager.speakAndAwait(
-                text = settings.wakeAckPhrase,
-                rate = settings.ttsSpeechRate,
-                pitch = settings.ttsPitch,
-                timeoutMs = 3_500L
-            )
-            delay(160L)
-
-            CheetahRuntimeBus.updatePipelineState(AssistantPipelineState.LISTENING_COMMAND)
-            val sttResult = sttManager.listenOnce(
-                timeoutMs = 9_500L,
-                onRmsDb = { CheetahRuntimeBus.updateMicLevel(it) }
-            )
-            sttResult.getOrElse { err ->
-                CheetahRuntimeBus.updatePipelineState(AssistantPipelineState.ERROR)
-                val errMsg = err.message ?: "ماسمعتش أمر واضح يا فندم."
-                CheetahRuntimeBus.updateDiagnostics {
-                    it.copy(lastError = errMsg)
-                }
-                ttsManager.speakAndAwait(
-                    text = errMsg,
-                    rate = settings.ttsSpeechRate,
-                    pitch = settings.ttsPitch,
-                    timeoutMs = 5_000L
-                )
-                delay(250L)
-                CheetahRuntimeBus.updatePipelineState(AssistantPipelineState.LISTENING_WAKE_WORD)
-                return
-            }
-        }
-
-        CheetahRuntimeBus.updatePipelineState(AssistantPipelineState.THINKING_LOCAL)
-        val perms = PermissionHealthChecker.inspect(applicationContext)
-        val contextState = memoryStore.current()
-        val (_, parsedIntent) = EgyptianColloquialNluParser.parse(
-            rawInput = commandText,
-            configuredWakePhrase = settings.wakePhrase,
-            contextState = contextState
-        )
-
-        val verdict = CommandGuardrailValidator.validate(
-            intent = parsedIntent,
-            settings = settings,
-            permissions = perms,
-            voiceMatchPassed = voiceMatchPassed
-        )
-
-        val replyText: String = when (verdict) {
-            is GuardrailVerdict.Denied -> {
-                CheetahRuntimeBus.updatePipelineState(AssistantPipelineState.BLOCKED_BY_GUARDRAIL)
-                val reply = JarvisEgyptianResponder.formatGuardrailBlockReply(
-                    verdict.reasonAr,
-                    settings.personaTone
-                )
-                memoryStore.recordTurn(
-                    userText = commandText,
-                    assistantReply = reply,
-                    intentCategory = parsedIntent.categoryName
-                )
-                reply
-            }
-
-            is GuardrailVerdict.Allowed -> {
-                CheetahRuntimeBus.updatePipelineState(AssistantPipelineState.EXECUTING_ACTION)
-                val execResult = DeviceActionExecutor.execute(
-                    context = applicationContext,
-                    intent = verdict.intent,
-                    tone = settings.personaTone,
-                    memoryState = contextState
-                )
-                memoryStore.recordTurn(
-                    userText = commandText,
-                    assistantReply = execResult.replyAr,
-                    intentCategory = verdict.intent.categoryName,
-                    newAppContext = execResult.newAppContext,
-                    newSearchQuery = execResult.newSearchQuery,
-                    newOpenedApp = execResult.newOpenedApp
-                )
-                execResult.replyAr
-            }
-        }
-
-        CheetahRuntimeBus.updatePipelineState(AssistantPipelineState.SPEAKING)
-        ttsManager.speakAndAwait(
-            text = replyText,
-            rate = settings.ttsSpeechRate,
-            pitch = settings.ttsPitch,
-            timeoutMs = 8_500L
-        )
-        delay(250L)
-        CheetahRuntimeBus.updatePipelineState(AssistantPipelineState.LISTENING_WAKE_WORD)
-    }
-
     @Suppress("DEPRECATION")
     private fun vibratePulse() {
         val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator ?: return
@@ -624,8 +836,8 @@ class WakeWordDetectionService : Service() {
         }
     }
 
-    private fun startForegroundCompat() {
-        val notification = buildNotification()
+    private fun startForegroundCompat(settings: AssistantSettings) {
+        val notification = buildNotification(settings)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -646,12 +858,12 @@ class WakeWordDetectionService : Service() {
         }
     }
 
-    private fun updateNotification() {
+    private fun updateNotification(settings: AssistantSettings = AssistantSettings()) {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.notify(NOTIFICATION_ID, buildNotification())
+        nm.notify(NOTIFICATION_ID, buildNotification(settings))
     }
 
-    private fun buildNotification(): Notification {
+    private fun buildNotification(settings: AssistantSettings): Notification {
         val openAppIntent = PendingIntent.getActivity(
             this,
             0,
@@ -673,11 +885,13 @@ class WakeWordDetectionService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val title = if (isMuted) "شيتا في وضع الكتم المؤقت" else getString(R.string.notification_listening_title)
+        val name = settings.assistantName.ifBlank { "شيتا" }
+        val listeningVerb = if (settings.assistantGender == AssistantGender.FEMALE) "مستعدة وبتسمع" else "مستعد وبيسمع"
+        val title = if (isMuted) "$name في وضع الكتم المؤقت" else "$name $listeningVerb محلياً"
         val body = if (isMuted) {
             "المايك مكتوم مؤقتاً — اضغط لإلغاء الكتم."
         } else {
-            getString(R.string.notification_listening_body)
+            "الاستماع أوفلاين لكلمة «${settings.wakePhrase}» في الخلفية."
         }
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
@@ -712,7 +926,10 @@ class WakeWordDetectionService : Service() {
     }
 
     override fun onDestroy() {
-        captureJob?.cancel()
+        activeCycleJob?.cancel()
+        watchdogJob?.cancel()
+        captureSupervisorJob?.cancel()
+        MicrophoneArbitrator.releaseWakeAudioRecordIfHeld()
         sttManager.stopAndRelease()
         ttsManager.release()
         bundledModel?.close()

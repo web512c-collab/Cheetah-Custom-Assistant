@@ -48,6 +48,7 @@ class BootCompletedReceiver : BroadcastReceiver() {
                 ) == PackageManager.PERMISSION_GRANTED
                 if (!hasMic) return@launch
 
+                WakeWatchdogReceiver.schedulePeriodicWatchdog(appContext)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                     // Android 14+ prohibits starting microphone FGS from BOOT_COMPLETED
                     postResumeNotification(appContext)

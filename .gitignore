@@ -4,6 +4,10 @@
 build/
 app/build/
 dist/
+.build-outputs/
+*.apk
+*.aab
+*.ap_
 
 # Local environment & IDE
 local.properties
@@ -14,6 +18,11 @@ local.properties
 captures/
 .externalNativeBuild/
 .cxx/
+
+# Local LLM model weights (unbundled, never commit)
+*.gguf
+*.gguf.*
+*.part
 
 # Keystores & Secrets
 *.keystore

@@ -72,11 +72,16 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.core.model.AiMode
+import com.example.core.model.AssistantGender
 import com.example.core.model.AssistantSettings
 import com.example.core.model.ConversationContextState
 import com.example.core.model.EndLineRule
+import com.example.core.model.LocalLlmRuntimeStatus
+import com.example.core.model.PerformanceProfile
 import com.example.core.model.PermissionHealthState
 import com.example.core.model.PersonaTone
+import com.example.core.model.TransitionLogEntry
 import com.example.core.model.VoiceTemplateSample
 import com.example.core.model.WakeDiagnosticSnapshot
 import com.example.data.VoiceTemplateStore
@@ -106,14 +111,19 @@ fun SettingsScreen(
     ttsStatus: TtsStatus,
     offlineSttStatus: OfflineSttStatus,
     diagnostics: WakeDiagnosticSnapshot,
+    transitionLog: List<TransitionLogEntry>,
+    localLlmStatus: LocalLlmRuntimeStatus,
     memoryState: ConversationContextState,
     serviceRunning: Boolean,
     liveMicLevel: Float,
     isRecordingEnrollment: Boolean,
     enrollmentAmplitude: Float,
     enrollmentFeedbackAr: String?,
+    isBenchmarkRunning: Boolean = false,
     onLaunchDefaultAssistantPicker: () -> Unit,
     onOpenVoiceInputSettings: () -> Unit,
+    onUpdateIdentityAndGender: (String?, AssistantGender?, AssistantGender?, String?) -> Unit,
+    onOpenSystemTtsSettings: () -> Unit,
     onSaveTypedWakePhrase: (String) -> Unit,
     onRecordVoiceSample: (String) -> Unit,
     onClearVoiceSamples: () -> Unit,
@@ -126,15 +136,27 @@ fun SettingsScreen(
     onToggleRule: (String, Boolean) -> Unit,
     onToggleContinuousListening: (Boolean) -> Unit,
     onToggleMute: () -> Unit,
-    onRequestMicPermission: () -> Unit,
-    onRequestNotificationPermission: () -> Unit,
-    onOpenAccessibilitySettings: () -> Unit,
-    onOpenOverlaySettings: () -> Unit,
-    onRequestBatteryExemption: () -> Unit,
+    onToggleMicSwitch: (Boolean) -> Unit,
+    onToggleNotificationSwitch: (Boolean) -> Unit,
+    onToggleBatterySwitch: (Boolean) -> Unit,
+    onToggleAccessibilitySwitch: (Boolean) -> Unit,
+    onToggleOverlaySwitch: (Boolean) -> Unit,
+    onOpenAppSettings: () -> Unit,
     onRefreshPermissions: () -> Unit,
+    onPickGgufModel: () -> Unit,
+    onLoadGgufModel: () -> Unit,
+    onUnloadGgufModel: () -> Unit,
+    onRemoveGgufModel: () -> Unit,
+    onCancelLlmGeneration: () -> Unit,
+    onUpdateLlmConfig: (Int?, Int?, Float?, Int?) -> Unit,
+    onUpdateAiBrainConfig: (Boolean?, AiMode?, Boolean?, Int?, Boolean?, Boolean?, Int?, PerformanceProfile?, Int?) -> Unit = { _, _, _, _, _, _, _, _, _ -> },
+    onUpdateDomainLists: (List<String>, List<String>) -> Unit = { _, _ -> },
+    onRunBenchmark: () -> Unit = {},
+    onSetInternetSearch: (Boolean, String?) -> Unit,
     onRunMicDiagnosticTest: () -> Unit,
     onMarkFalseActivation: () -> Unit,
     onResetDiagnosticCounters: () -> Unit,
+    onClearTransitionLog: () -> Unit,
     onAddShortcut: (String, String) -> Unit,
     onDeleteShortcut: (String) -> Unit,
     onDeleteMemoryEntry: (Long) -> Unit,
@@ -294,7 +316,7 @@ fun SettingsScreen(
                         Switch(
                             checked = serviceRunning,
                             onCheckedChange = { want ->
-                                if (want && !permissions.hasMicPermission) onRequestMicPermission()
+                                if (want && !permissions.hasMicPermission) onToggleMicSwitch(true)
                                 else onToggleContinuousListening(want)
                             },
                             colors = SwitchDefaults.colors(checkedThumbColor = CheetahObsidian, checkedTrackColor = CheetahCyan),
@@ -434,7 +456,7 @@ fun SettingsScreen(
                         Button(
                             onClick = {
                                 if (!permissions.hasMicPermission) {
-                                    onRequestMicPermission()
+                                    onToggleMicSwitch(true)
                                 } else {
                                     onRecordVoiceSample(draftWakeName.ifBlank { "يا شيتا" })
                                 }
@@ -805,10 +827,56 @@ fun SettingsScreen(
                 }
             }
 
-            // 4. PERMISSIONS & BACKGROUND HEALTH CENTER
+            // 4. ASSISTANT IDENTITY, GRAMMATICAL GENDER & VOICE (PART C)
+            item {
+                AssistantIdentityAndVoiceCard(
+                    settings = settings,
+                    ttsStatus = ttsStatus,
+                    onUpdateIdentityAndGender = onUpdateIdentityAndGender,
+                    onOpenSystemTtsSettings = onOpenSystemTtsSettings,
+                    onTestEgyptianTts = onTestEgyptianTts
+                )
+            }
+
+            // 5. LOCAL UNBUNDLED GGUF LLM (PART B)
+            item {
+                LocalGgufLlmCard(
+                    settings = settings,
+                    llmStatus = localLlmStatus,
+                    onPickGgufModel = onPickGgufModel,
+                    onLoadModel = onLoadGgufModel,
+                    onUnloadModel = onUnloadGgufModel,
+                    onRemoveModel = onRemoveGgufModel,
+                    onCancelGeneration = onCancelLlmGeneration,
+                    onUpdateLlmConfig = onUpdateLlmConfig
+                )
+            }
+
+            // 5B. AI BRAIN BEHAVIOR, THINKING MODE & SEARCH JUDGE SETTINGS (v0.4.0)
+            item {
+                AiBrainBehaviorCard(
+                    settings = settings,
+                    llmStatus = localLlmStatus,
+                    isBenchmarkRunning = isBenchmarkRunning,
+                    onUpdateAiBrainConfig = onUpdateAiBrainConfig,
+                    onUpdateDomainLists = onUpdateDomainLists,
+                    onRunBenchmark = onRunBenchmark
+                )
+            }
+
+            // 6. OPTIONAL KEYLESS INTERNET SEARCH (PART D)
+            item {
+                KeylessInternetSearchCard(
+                    settings = settings,
+                    onToggleInternetSearch = { en -> onSetInternetSearch(en, null) },
+                    onSaveCustomSearxngUrl = { url -> onSetInternetSearch(settings.internetSearchEnabled, url) }
+                )
+            }
+
+            // 7. PERMISSIONS & BACKGROUND HEALTH CENTER (BUG A3 SWITCHES)
             item {
                 SettingsSectionCard(
-                    title = "4. مركز الصلاحيات وصحة الخلفية",
+                    title = "مركز الصلاحيات وصحة الخلفية",
                     icon = Icons.Default.CheckCircle,
                     accent = CheetahEmerald
                 ) {
@@ -822,11 +890,19 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.titleMedium,
                             color = CheetahCyan
                         )
-                        OutlinedButton(
-                            onClick = onRefreshPermissions,
-                            modifier = Modifier.testTag("settings_refresh_permissions_btn")
-                        ) {
-                            Text("تحديث الحالة", color = CheetahTextPrimary)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(
+                                onClick = onOpenAppSettings,
+                                modifier = Modifier.testTag("settings_open_app_info_btn")
+                            ) {
+                                Text("إعدادات التطبيق", color = CheetahAmber)
+                            }
+                            OutlinedButton(
+                                onClick = onRefreshPermissions,
+                                modifier = Modifier.testTag("settings_refresh_permissions_btn")
+                            ) {
+                                Text("تحديث", color = CheetahTextPrimary)
+                            }
                         }
                     }
                     Spacer(modifier = Modifier.height(6.dp))
@@ -842,62 +918,67 @@ fun SettingsScreen(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    PermissionCheckRow(
+                    PermissionSwitchRow(
                         icon = Icons.Default.Mic,
                         titleAr = "صلاحية المايكروفون",
-                        subtitleAr = "ضرورية لكلمة التنبيه، Voice Match، والاستماع للأوامر.",
-                        granted = permissions.hasMicPermission,
-                        actionLabel = "تفعيل",
-                        testTag = "perm_mic_btn",
-                        onClick = onRequestMicPermission
+                        subtitleAr = "تفعيل أو إيقاف استخدام المايك لكلمة التنبيه والأوامر الصوتية.",
+                        checked = permissions.hasMicPermission && settings.micFeatureEnabled,
+                        osGranted = permissions.hasMicPermission,
+                        testTag = "perm_mic_switch",
+                        onCheckedChange = onToggleMicSwitch
                     )
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        PermissionCheckRow(
+                        PermissionSwitchRow(
                             icon = Icons.Default.Notifications,
                             titleAr = "إشعارات خدمة الخلفية (Android 13+)",
                             subtitleAr = "تظهر إشعار واضح ومفتاح كتم أثناء عمل المايك.",
-                            granted = permissions.hasNotificationPermission,
-                            actionLabel = "السماح",
-                            testTag = "perm_notif_btn",
-                            onClick = onRequestNotificationPermission
+                            checked = permissions.hasNotificationPermission && settings.notificationsFeatureEnabled,
+                            osGranted = permissions.hasNotificationPermission,
+                            testTag = "perm_notif_switch",
+                            onCheckedChange = onToggleNotificationSwitch
                         )
                     }
-                    PermissionCheckRow(
-                        icon = Icons.Default.Assistant,
-                        titleAr = "المساعد الافتراضي للهاتف",
-                        subtitleAr = "تفعيل شيتا بدل مساعد جوجل عند الضغط المطول.",
-                        granted = permissions.isDefaultAssistant,
-                        actionLabel = "إعداد",
-                        testTag = "perm_assistant_btn",
-                        onClick = onLaunchDefaultAssistantPicker
-                    )
-                    PermissionCheckRow(
+                    PermissionSwitchRow(
                         icon = Icons.Default.BatteryChargingFull,
                         titleAr = "استثناء توفير البطارية (Doze)",
                         subtitleAr = "يمنع النظام من إيقاف خدمة كلمة التنبيه في الخلفية.",
-                        granted = permissions.isBatteryOptimizationIgnored,
-                        actionLabel = "استثناء",
-                        testTag = "perm_battery_btn",
-                        onClick = onRequestBatteryExemption
+                        checked = permissions.isBatteryOptimizationIgnored,
+                        osGranted = permissions.isBatteryOptimizationIgnored,
+                        testTag = "perm_battery_switch",
+                        onCheckedChange = onToggleBatterySwitch
                     )
-                    PermissionCheckRow(
+                    PermissionSwitchRow(
                         icon = Icons.Default.AccessibilityNew,
                         titleAr = "خدمة إمكانية الوصول (Accessibility)",
                         subtitleAr = "اختيارية لأوامر التمرير والرجوع والضغط على الشاشة.",
-                        granted = permissions.isAccessibilityEnabled,
-                        actionLabel = "فتح",
-                        testTag = "perm_accessibility_btn",
-                        onClick = onOpenAccessibilitySettings
+                        checked = permissions.isAccessibilityEnabled,
+                        osGranted = permissions.isAccessibilityEnabled,
+                        testTag = "perm_accessibility_switch",
+                        onCheckedChange = onToggleAccessibilitySwitch
                     )
-                    PermissionCheckRow(
+                    PermissionSwitchRow(
                         icon = Icons.Default.Layers,
                         titleAr = "الظهور فوق التطبيقات الأخرى",
                         subtitleAr = "اختيارية لعرض شاشة المساعد فوق أي تطبيق مفتوح.",
-                        granted = permissions.canDrawOverlays,
-                        actionLabel = "منح",
-                        testTag = "perm_overlay_btn",
-                        onClick = onOpenOverlaySettings
+                        checked = permissions.canDrawOverlays,
+                        osGranted = permissions.canDrawOverlays,
+                        testTag = "perm_overlay_switch",
+                        onCheckedChange = onToggleOverlaySwitch
                     )
+
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedButton(
+                        onClick = onLaunchDefaultAssistantPicker,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("perm_assistant_btn")
+                    ) {
+                        Text(
+                            text = if (permissions.isDefaultAssistant) "المساعد الافتراضي: مفعّل ✓" else "تحديد ${settings.assistantName} كمساعد افتراضي",
+                            color = if (permissions.isDefaultAssistant) CheetahEmerald else CheetahCyan
+                        )
+                    }
 
                     Spacer(modifier = Modifier.height(8.dp))
                     Surface(
@@ -906,7 +987,7 @@ fun SettingsScreen(
                         border = BorderStroke(1.dp, CheetahBorder)
                     ) {
                         Text(
-                            text = "ملاحظة لأجهزة شاومي / سامسونج / أوبو: لو الخدمة وقفت لوحدها بعد قفل الشاشة، فعّل «التشغيل التلقائي (Autostart)» واقفل تطبيق شيتا في شاشة التطبيقات الحديثة. وفي أندرويد 14+ بعد إعادة التشغيل يظهر إشعار بضغطة واحدة لتشغيل المايك.",
+                            text = "لثبات الخلفية على شاومي / سامسونج / أوبو / فيفو: فعّل «التشغيل التلقائي (Autostart)» واختر «بلا قيود» للبطارية واقفل التطبيق في شاشة التطبيقات الحديثة. وإذا رفضت الصلاحية نهائياً اضغط «إعدادات التطبيق» لتفعيلها يدوياً.",
                             style = MaterialTheme.typography.bodySmall,
                             color = CheetahTextSecondary,
                             modifier = Modifier.padding(12.dp)
@@ -915,7 +996,7 @@ fun SettingsScreen(
                 }
             }
 
-            // 5. LOCAL ENGINE STATUS (STT / TTS / MFCC-DTW)
+            // 8. LOCAL ENGINE STATUS (STT / TTS / MFCC-DTW)
             item {
                 LocalEngineStatusCard(
                     offlineSttStatus = offlineSttStatus,
@@ -924,19 +1005,21 @@ fun SettingsScreen(
                 )
             }
 
-            // 6. WAKE-WORD DIAGNOSTIC CONSOLE
+            // 9. WAKE-WORD DIAGNOSTIC CONSOLE & TRANSITION LOG
             item {
                 WakeDiagnosticConsoleCard(
                     diagnostics = diagnostics,
+                    transitionLog = transitionLog,
                     liveMicLevel = liveMicLevel,
                     serviceRunning = serviceRunning,
                     onRunMicDiagnosticTest = onRunMicDiagnosticTest,
                     onMarkFalseActivation = onMarkFalseActivation,
-                    onResetCounters = onResetDiagnosticCounters
+                    onResetCounters = onResetDiagnosticCounters,
+                    onClearTransitionLog = onClearTransitionLog
                 )
             }
 
-            // 7. LOCAL MEMORY & PERSONAL SHORTCUTS
+            // 10. LOCAL MEMORY & PERSONAL SHORTCUTS
             item {
                 LocalMemoryAndShortcutsCard(
                     memoryState = memoryState,
@@ -979,14 +1062,14 @@ private fun SettingsSectionCard(
 }
 
 @Composable
-private fun PermissionCheckRow(
+private fun PermissionSwitchRow(
     icon: ImageVector,
     titleAr: String,
     subtitleAr: String,
-    granted: Boolean,
-    actionLabel: String,
+    checked: Boolean,
+    osGranted: Boolean,
     testTag: String,
-    onClick: () -> Unit
+    onCheckedChange: (Boolean) -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -997,17 +1080,25 @@ private fun PermissionCheckRow(
         Icon(
             imageVector = icon,
             contentDescription = null,
-            tint = if (granted) CheetahEmerald else CheetahAmber,
+            tint = if (osGranted) CheetahEmerald else CheetahAmber,
             modifier = Modifier.size(22.dp)
         )
         Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = titleAr,
-                style = MaterialTheme.typography.bodyMedium,
-                color = CheetahTextPrimary,
-                fontWeight = FontWeight.Bold
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = titleAr,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = CheetahTextPrimary,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = if (osGranted) "• ممنوحة" else "• غير ممنوحة",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (osGranted) CheetahEmerald else CheetahTextSecondary
+                )
+            }
             Text(
                 text = subtitleAr,
                 style = MaterialTheme.typography.bodySmall,
@@ -1015,28 +1106,14 @@ private fun PermissionCheckRow(
             )
         }
         Spacer(modifier = Modifier.width(8.dp))
-        if (granted) {
-            Surface(
-                color = CheetahEmerald.copy(alpha = 0.16f),
-                shape = RoundedCornerShape(50)
-            ) {
-                Text(
-                    text = "مفعّل",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = CheetahEmerald,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                )
-            }
-        } else {
-            Button(
-                onClick = onClick,
-                colors = ButtonDefaults.buttonColors(containerColor = CheetahCardElevated),
-                modifier = Modifier
-                    .height(48.dp)
-                    .testTag(testTag)
-            ) {
-                Text(text = actionLabel, color = CheetahCyan)
-            }
-        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = CheetahObsidian,
+                checkedTrackColor = if (osGranted) CheetahEmerald else CheetahAmber
+            ),
+            modifier = Modifier.testTag(testTag)
+        )
     }
 }

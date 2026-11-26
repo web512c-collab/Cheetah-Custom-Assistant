@@ -119,4 +119,21 @@ object PermissionHealthChecker {
             Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
             Uri.parse("package:${context.packageName}")
         ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+    fun buildAppDetailsSettingsIntent(context: Context): Intent =
+        Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:${context.packageName}")
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+    fun isPermissionPermanentlyDenied(
+        activity: android.app.Activity?,
+        permission: String,
+        wasRequestedBefore: Boolean
+    ): Boolean {
+        if (activity == null || !wasRequestedBefore) return false
+        val granted = ContextCompat.checkSelfPermission(activity, permission) == PackageManager.PERMISSION_GRANTED
+        if (granted) return false
+        return !androidx.core.app.ActivityCompat.shouldShowRequestPermissionRationale(activity, permission)
+    }
 }

@@ -12,8 +12,10 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
 
 data class OfflineSttStatus(
@@ -25,9 +27,11 @@ data class OfflineSttStatus(
 
 /**
  * Local/On-Device Speech-to-Text manager configured for Egyptian Colloquial Arabic (ar-EG).
- * Dispatches all SpeechRecognizer lifecycle operations onto the Main Looper (required by Android OS),
- * uses createOnDeviceSpeechRecognizer on Android 12+ (API 31+) when supported,
- * and falls back to SpeechRecognizer with EXTRA_PREFER_OFFLINE = true on Android 7.0+.
+ * Hardened against OEM SpeechRecognizer hangs & AudioRecord hardware contention:
+ * - Dispatches all SpeechRecognizer operations onto Main Looper
+ * - Guards callbacks with sessionId + AtomicBoolean so stale callbacks never corrupt state
+ * - Isolates stopListening/cancel/destroy calls so OEM DeadObjectException never leaks recognizer
+ * - Always clears CheetahRuntimeBus.isSttActive on completion, error, timeout, or cancellation
  */
 class EgyptianOfflineSttManager(private val context: Context) {
 
@@ -35,6 +39,7 @@ class EgyptianOfflineSttManager(private val context: Context) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
     private var timeoutRunnable: Runnable? = null
+    private val sessionSeq = AtomicLong(0L)
 
     fun isOnDeviceSupported(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -87,8 +92,9 @@ class EgyptianOfflineSttManager(private val context: Context) {
             return
         }
 
+        val sid = sessionSeq.incrementAndGet()
         mainHandler.post {
-            startListeningOnMainThread(timeoutMs, onRmsDb, onPartialResult, onFinalResult, onError)
+            startListeningOnMainThread(sid, timeoutMs, onRmsDb, onPartialResult, onFinalResult, onError)
         }
     }
 
@@ -96,51 +102,65 @@ class EgyptianOfflineSttManager(private val context: Context) {
         timeoutMs: Long = 9_500L,
         onRmsDb: (Float) -> Unit = {},
         onPartialResult: (String) -> Unit = {}
-    ): Result<String> = suspendCancellableCoroutine { cont ->
-        val completed = AtomicBoolean(false)
-        cont.invokeOnCancellation {
-            stopAndRelease()
-        }
-        startListening(
-            timeoutMs = timeoutMs,
-            onRmsDb = onRmsDb,
-            onPartialResult = onPartialResult,
-            onFinalResult = { text ->
-                if (completed.compareAndSet(false, true) && cont.isActive) {
-                    cont.resume(Result.success(text))
-                }
-            },
-            onError = { err ->
-                if (completed.compareAndSet(false, true) && cont.isActive) {
-                    cont.resume(Result.failure(IllegalStateException(err)))
-                }
+    ): Result<String> {
+        val result = suspendCancellableCoroutine { cont ->
+            val completed = AtomicBoolean(false)
+            cont.invokeOnCancellation {
+                stopAndRelease()
             }
-        )
+            startListening(
+                timeoutMs = timeoutMs,
+                onRmsDb = onRmsDb,
+                onPartialResult = onPartialResult,
+                onFinalResult = { text ->
+                    if (completed.compareAndSet(false, true) && cont.isActive) {
+                        cont.resume(Result.success(text))
+                    }
+                },
+                onError = { err ->
+                    if (completed.compareAndSet(false, true) && cont.isActive) {
+                        cont.resume(Result.failure(IllegalStateException(err)))
+                    }
+                }
+            )
+        }
+        // Brief hardware release settle window before AudioRecord resumes on OEM devices
+        delay(200L)
+        return result
     }
 
     private fun startListeningOnMainThread(
+        sid: Long,
         timeoutMs: Long,
         onRmsDb: (Float) -> Unit,
         onPartialResult: (String) -> Unit,
         onFinalResult: (String) -> Unit,
         onError: (String) -> Unit
     ) {
+        if (sid != sessionSeq.get()) return
         destroyRecognizerOnMainThread()
 
-        val created = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext)
-        ) {
-            SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext)
-        } else if (SpeechRecognizer.isRecognitionAvailable(appContext)) {
-            SpeechRecognizer.createSpeechRecognizer(appContext)
-        } else {
+        val created = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext)
+            ) {
+                SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext)
+            } else if (SpeechRecognizer.isRecognitionAvailable(appContext)) {
+                SpeechRecognizer.createSpeechRecognizer(appContext)
+            } else {
+                null
+            }
+        }.getOrNull()
+
+        if (created == null) {
+            CheetahRuntimeBus.setSttActive(false)
             onError("محرك التعرف على الكلام المحلي مش متوفر على الجهاز ده. تقدر تكتب الأمر مباشرة.")
             return
         }
 
         val delivered = AtomicBoolean(false)
         val timeoutTask = Runnable {
-            if (delivered.compareAndSet(false, true)) {
+            if (sid == sessionSeq.get() && delivered.compareAndSet(false, true)) {
                 destroyRecognizerOnMainThread()
                 onRmsDb(0f)
                 onError("انتهت مهلة الاستماع بدون سماع أمر واضح.")
@@ -156,6 +176,7 @@ class EgyptianOfflineSttManager(private val context: Context) {
             override fun onBeginningOfSpeech() = Unit
 
             override fun onRmsChanged(rmsdB: Float) {
+                if (sid != sessionSeq.get()) return
                 val normalized = ((rmsdB + 2f) / 12f).coerceIn(0f, 1f)
                 onRmsDb(normalized)
             }
@@ -163,11 +184,11 @@ class EgyptianOfflineSttManager(private val context: Context) {
             override fun onBufferReceived(buffer: ByteArray?) = Unit
 
             override fun onEndOfSpeech() {
-                onRmsDb(0f)
+                if (sid == sessionSeq.get()) onRmsDb(0f)
             }
 
             override fun onError(error: Int) {
-                if (!delivered.compareAndSet(false, true)) return
+                if (sid != sessionSeq.get() || !delivered.compareAndSet(false, true)) return
                 cancelTimeoutOnMainThread()
                 CheetahRuntimeBus.setSttActive(false)
                 onRmsDb(0f)
@@ -180,6 +201,8 @@ class EgyptianOfflineSttManager(private val context: Context) {
                         "محتاج صلاحية المايكروفون."
                     SpeechRecognizer.ERROR_AUDIO ->
                         "مشكلة في تسجيل الصوت من المايكروفون."
+                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY ->
+                        "محرك التعرف مشغول لحظياً، جرب تاني."
                     SpeechRecognizer.ERROR_NETWORK,
                     SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
                     SpeechRecognizer.ERROR_SERVER ->
@@ -195,7 +218,7 @@ class EgyptianOfflineSttManager(private val context: Context) {
             }
 
             override fun onResults(results: Bundle?) {
-                if (!delivered.compareAndSet(false, true)) return
+                if (sid != sessionSeq.get() || !delivered.compareAndSet(false, true)) return
                 cancelTimeoutOnMainThread()
                 CheetahRuntimeBus.setSttActive(false)
                 onRmsDb(0f)
@@ -210,6 +233,7 @@ class EgyptianOfflineSttManager(private val context: Context) {
             }
 
             override fun onPartialResults(partialResults: Bundle?) {
+                if (sid != sessionSeq.get()) return
                 val partial = partialResults
                     ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull()
@@ -238,7 +262,7 @@ class EgyptianOfflineSttManager(private val context: Context) {
         runCatching {
             created.startListening(intent)
         }.onFailure {
-            if (delivered.compareAndSet(false, true)) {
+            if (sid == sessionSeq.get() && delivered.compareAndSet(false, true)) {
                 cancelTimeoutOnMainThread()
                 CheetahRuntimeBus.setSttActive(false)
                 destroyRecognizerOnMainThread()
@@ -248,6 +272,8 @@ class EgyptianOfflineSttManager(private val context: Context) {
     }
 
     fun stopAndRelease() {
+        sessionSeq.incrementAndGet()
+        CheetahRuntimeBus.setSttActive(false)
         if (Looper.myLooper() == Looper.getMainLooper()) {
             destroyRecognizerOnMainThread()
         } else {
@@ -263,11 +289,12 @@ class EgyptianOfflineSttManager(private val context: Context) {
     private fun destroyRecognizerOnMainThread() {
         cancelTimeoutOnMainThread()
         CheetahRuntimeBus.setSttActive(false)
-        runCatching {
-            recognizer?.stopListening()
-            recognizer?.cancel()
-            recognizer?.destroy()
-        }
+        val rec = recognizer
         recognizer = null
+        if (rec != null) {
+            runCatching { rec.stopListening() }
+            runCatching { rec.cancel() }
+            runCatching { rec.destroy() }
+        }
     }
 }
