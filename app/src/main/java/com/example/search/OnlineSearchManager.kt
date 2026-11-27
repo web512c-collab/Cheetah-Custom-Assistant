@@ -2,13 +2,18 @@ package com.example.search
 
 import com.example.core.model.AssistantSettings
 import com.example.core.model.ConcreteSearchEngine
+import com.example.core.model.PerEngineTestReport
 import com.example.core.model.SearchEngineMode
 import com.example.core.model.SearchEngineTestResult
 import com.example.core.model.WebSearchOutcome
 import com.example.core.model.WebSearchSource
 import com.example.voice.CheetahRuntimeBus
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
@@ -18,26 +23,33 @@ import java.net.URLEncoder
 import java.util.LinkedHashMap
 
 /**
- * Keyless HTTPS internet search manager (Part D + v0.4.1 Search Engine Selector).
+ * Keyless HTTPS multi-engine parallel internet search manager (v0.5.0 Part 5).
  *
  * Privacy & security guarantees:
  * 1. Strictly gated behind settings.internetSearchEnabled (OFF by default).
  * 2. Sends ONLY the cleaned search query text (never mic audio, conversation memory, or PII).
  * 3. HTTPS-only with explicit connect/read timeouts, User-Agent, LRU TTL cache, and rate limiter.
- * 4. Honest endpoint disclosure:
- *    - DuckDuckGo: Instant Answer public JSON API + DuckDuckGo HTML public endpoint (scraped gracefully).
+ * 4. Honest keyless endpoint disclosure (never scrapes Google or Bing):
+ *    - DuckDuckGo: Instant Answer public JSON API + DuckDuckGo HTML public endpoint (parsed gracefully).
  *    - Wikipedia: Official MediaWiki Search JSON API & REST Summary API (no key required).
+ *    - Mojeek: Public HTML search results page over HTTPS (parsed gracefully).
  *    - SearXNG: User-configured HTTPS instance `/search?format=json` JSON endpoint.
- *    - Auto: User-ordered fallback across DuckDuckGo, Wikipedia, and SearXNG.
+ *    - Auto: Runs enabled engines in parallel with per-engine timeout, deduplicates & ranks via
+ *      Reciprocal Rank Fusion (RRF) + multi-engine consensus boost, and optionally enriches
+ *      top HTTPS links with cleaned readable excerpts (<= 120 KB).
  */
 object OnlineSearchManager {
 
     private const val CONNECT_TIMEOUT_MS = 6_000
     private const val READ_TIMEOUT_MS = 8_000
+    private const val PAGE_CONNECT_TIMEOUT_MS = 4_000
+    private const val PAGE_READ_TIMEOUT_MS = 5_000
+    private const val MAX_PAGE_EXCERPT_BYTES = 120 * 1024 // 120 KB cap
     private const val CACHE_TTL_MS = 15 * 60_000L
     private const val MAX_CACHE_SIZE = 24
     private const val MIN_REQUEST_INTERVAL_MS = 1_200L
-    private const val USER_AGENT = "CheetahCustomAssistant/0.4.1 (Android; KeylessSearch)"
+    private const val DEFAULT_PER_ENGINE_TIMEOUT_MS = 7_500L
+    private const val USER_AGENT = "SheetaCustomAssistant/0.5.0 (Android; KeylessSearch)"
 
     private val DDG_HTML_LINK_REGEX = Regex(
         """(?is)<a[^>]*class=["'][^"']*result__a[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>"""
@@ -45,11 +57,31 @@ object OnlineSearchManager {
     private val DDG_HTML_SNIPPET_REGEX = Regex(
         """(?is)<(?:a|div)[^>]*class=["'][^"']*result__snippet[^"']*["'][^>]*>(.*?)</(?:a|div)>"""
     )
+    private val MOJEEK_BLOCK_REGEX = Regex(
+        """(?is)<li[^>]*>(.*?)</li>"""
+    )
+    private val MOJEEK_LINK_REGEX = Regex(
+        """(?is)<a[^>]*class=["'][^"']*(?:title|ob)[^"']*["'][^>]*href=["'](https://[^"']+)["'][^>]*>(.*?)</a>"""
+    )
+    private val MOJEEK_SNIPPET_REGEX = Regex(
+        """(?is)<p[^>]*class=["'][^"']*\bs\b[^"']*["'][^>]*>(.*?)</p>"""
+    )
     private val ISO_DATE_PREFIX_REGEX = Regex("""^(20\d{2}-\d{2}-\d{2})""")
+    private val TRACKING_QUERY_PARAMS = setOf(
+        "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+        "fbclid", "gclid", "mc_cid", "mc_eid", "ref", "source"
+    )
 
     private data class CacheEntry(
         val outcome: WebSearchOutcome,
         val cachedAtMs: Long
+    )
+
+    private data class EngineExecutionOutcome(
+        val engine: ConcreteSearchEngine,
+        val orderIndex: Int,
+        val hits: List<WebSearchSource>,
+        val report: PerEngineTestReport
     )
 
     private val cacheLock = Any()
@@ -83,6 +115,31 @@ object OnlineSearchManager {
         )
     }
 
+    fun normalizeUrlForDedup(rawUrl: String): String {
+        val trimmed = rawUrl.trim()
+        if (trimmed.isBlank()) return ""
+        return runCatching {
+            val u = URL(trimmed)
+            val host = u.host.lowercase().removePrefix("www.")
+            val path = u.path.trimEnd('/').ifEmpty { "" }
+            val filteredQuery = u.query
+                ?.split('&')
+                ?.mapNotNull { pair ->
+                    val key = pair.substringBefore('=').lowercase()
+                    if (key.isEmpty() || key in TRACKING_QUERY_PARAMS) null else pair
+                }
+                ?.sorted()
+                ?.joinToString("&")
+                ?.takeIf { it.isNotEmpty() }
+            buildString {
+                append(u.protocol.lowercase()).append("://").append(host).append(path)
+                if (filteredQuery != null) append('?').append(filteredQuery)
+            }
+        }.getOrElse {
+            trimmed.lowercase().trimEnd('/')
+        }
+    }
+
     suspend fun search(
         query: String,
         internetSearchEnabled: Boolean,
@@ -90,6 +147,9 @@ object OnlineSearchManager {
         maxResults: Int = 5,
         searchEngineMode: SearchEngineMode = SearchEngineMode.AUTO,
         autoSearchOrder: List<ConcreteSearchEngine> = AssistantSettings.DEFAULT_AUTO_ENGINE_ORDER,
+        enabledEngines: Set<ConcreteSearchEngine>? = null,
+        fetchPageExcerpts: Boolean = false,
+        perEngineTimeoutMs: Long = DEFAULT_PER_ENGINE_TIMEOUT_MS,
         bypassCache: Boolean = false,
         clockMs: () -> Long = { System.currentTimeMillis() },
         fetcher: (String) -> String = { url -> httpGetHttps(url) }
@@ -111,12 +171,16 @@ object OnlineSearchManager {
             )
         }
 
-        val requestedCap = maxResults.coerceIn(1, 8)
+        val requestedCap = maxResults.coerceIn(1, 10)
         val effectiveOrder = normalizeOrder(autoSearchOrder)
+        val activeSet = enabledEngines ?: ConcreteSearchEngine.entries.toSet()
+
         val cacheKey = buildString {
             append(cleanQuery.lowercase())
             append('|').append(searchEngineMode.name)
             append('|').append(effectiveOrder.joinToString(",") { it.name })
+            append('|').append(activeSet.map { it.name }.sorted().joinToString(","))
+            append('|').append(fetchPageExcerpts)
             append('|').append(customSearxngUrl.trim())
             append('|').append(requestedCap)
         }
@@ -144,81 +208,133 @@ object OnlineSearchManager {
             val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
             val isArabic = cleanQuery.any { it in '\u0600'..'\u06FF' }
 
-            val enginesToTry: List<ConcreteSearchEngine> = when (searchEngineMode) {
+            val enginesToRun: List<ConcreteSearchEngine> = when (searchEngineMode) {
                 SearchEngineMode.DUCKDUCKGO -> listOf(ConcreteSearchEngine.DUCKDUCKGO)
                 SearchEngineMode.WIKIPEDIA -> listOf(ConcreteSearchEngine.WIKIPEDIA)
+                SearchEngineMode.MOJEEK -> listOf(ConcreteSearchEngine.MOJEEK)
                 SearchEngineMode.SEARXNG -> listOf(ConcreteSearchEngine.SEARXNG)
-                SearchEngineMode.AUTO -> effectiveOrder
+                SearchEngineMode.AUTO -> effectiveOrder.filter { it in activeSet }
+                    .ifEmpty { effectiveOrder }
             }
 
+            if (searchEngineMode == SearchEngineMode.SEARXNG && !isValidHttpsUrl(customSearxngUrl)) {
+                val elapsed = (clockMs() - startTimeMs).coerceAtLeast(0L)
+                return@withContext WebSearchOutcome(
+                    query = cleanQuery,
+                    summaryText = "",
+                    sources = emptyList(),
+                    errorAr = "رابط خادم SearXNG غير مضبوط أو غير صالح (يجب أن يبدأ بـ https://).",
+                    engineUsed = "SearXNG",
+                    responseTimeMs = elapsed
+                )
+            }
+
+            val reports = mutableListOf<PerEngineTestReport>()
+            val perEngineResults = mutableListOf<Pair<ConcreteSearchEngine, List<WebSearchSource>>>()
             val errors = mutableListOf<String>()
-            var winningEngine = ""
-            val collected = mutableListOf<WebSearchSource>()
 
-            for (engine in enginesToTry) {
-                if (engine == ConcreteSearchEngine.SEARXNG && !isValidHttpsUrl(customSearxngUrl)) {
-                    if (searchEngineMode == SearchEngineMode.SEARXNG) {
-                        val elapsed = (clockMs() - startTimeMs).coerceAtLeast(0L)
-                        return@withContext WebSearchOutcome(
-                            query = cleanQuery,
-                            summaryText = "",
-                            sources = emptyList(),
-                            errorAr = "رابط خادم SearXNG غير مضبوط أو غير صالح (يجب أن يبدأ بـ https://).",
-                            engineUsed = "SearXNG",
-                            responseTimeMs = elapsed
-                        )
-                    } else {
-                        errors.add("SearXNG: رابط غير مضبوط")
-                        continue
+            if (enginesToRun.size <= 1) {
+                val single = enginesToRun.first()
+                val outcome = runSingleEngineWithReport(
+                    engine = single,
+                    orderIndex = 0,
+                    cleanQuery = cleanQuery,
+                    encodedQuery = encoded,
+                    isArabic = isArabic,
+                    customSearxngUrl = customSearxngUrl,
+                    maxItems = requestedCap,
+                    timeoutMs = perEngineTimeoutMs,
+                    clockMs = clockMs,
+                    fetcher = fetcher
+                )
+                reports.add(outcome.report)
+                if (outcome.hits.isNotEmpty()) {
+                    perEngineResults.add(single to outcome.hits)
+                } else if (outcome.report.note.isNotBlank()) {
+                    errors.add("${single.labelAr}: ${outcome.report.note}")
+                }
+            } else {
+                // Multi-engine parallel execution with per-engine isolation & timeout
+                val parallelOutcomes = coroutineScope {
+                    enginesToRun.mapIndexed { idx, engine ->
+                        async {
+                            if (engine == ConcreteSearchEngine.SEARXNG &&
+                                enabledEngines != null &&
+                                !isValidHttpsUrl(customSearxngUrl)
+                            ) {
+                                EngineExecutionOutcome(
+                                    engine = engine,
+                                    orderIndex = idx,
+                                    hits = emptyList(),
+                                    report = PerEngineTestReport(
+                                        engineName = engine.labelAr,
+                                        success = false,
+                                        resultCount = 0,
+                                        elapsedMs = 0L,
+                                        note = "رابط SearXNG غير مضبوط"
+                                    )
+                                )
+                            } else {
+                                runSingleEngineWithReport(
+                                    engine = engine,
+                                    orderIndex = idx,
+                                    cleanQuery = cleanQuery,
+                                    encodedQuery = encoded,
+                                    isArabic = isArabic,
+                                    customSearxngUrl = customSearxngUrl,
+                                    maxItems = requestedCap,
+                                    timeoutMs = perEngineTimeoutMs,
+                                    clockMs = clockMs,
+                                    fetcher = fetcher
+                                )
+                            }
+                        }
+                    }.awaitAll()
+                }.sortedBy { it.orderIndex }
+
+                for (o in parallelOutcomes) {
+                    reports.add(o.report)
+                    if (o.hits.isNotEmpty()) {
+                        perEngineResults.add(o.engine to o.hits)
+                    } else if (o.report.note.isNotBlank()) {
+                        errors.add("${o.engine.labelAr}: ${o.report.note}")
                     }
                 }
-
-                val attempt = runCatching {
-                    executeEngine(
-                        engine = engine,
-                        cleanQuery = cleanQuery,
-                        encodedQuery = encoded,
-                        isArabic = isArabic,
-                        customSearxngUrl = customSearxngUrl,
-                        maxItems = requestedCap,
-                        fetcher = fetcher
-                    )
-                }
-
-                attempt.onSuccess { hits ->
-                    if (hits.isNotEmpty()) {
-                        collected.addAll(hits)
-                        if (winningEngine.isBlank()) winningEngine = engine.labelAr
-                    } else {
-                        errors.add("${engine.labelAr}: لا توجد نتائج")
-                    }
-                }.onFailure { err ->
-                    errors.add("${engine.labelAr}: ${err.message ?: "تعذر الاتصال"}")
-                }
-
-                // Primary engine succeeded -> stop in single or Auto fallback mode
-                if (collected.isNotEmpty()) break
             }
 
-            val deduped = collected
-                .filter { it.snippet.isNotBlank() || it.title.isNotBlank() }
-                .distinctBy { it.url.ifBlank { it.title } }
-                .take(requestedCap)
+            var mergedSources = mergeAndRankRrf(
+                perEngineResults = perEngineResults,
+                maxItems = requestedCap
+            )
+
+            if (fetchPageExcerpts && mergedSources.isNotEmpty()) {
+                mergedSources = enrichTopSourcesWithExcerpts(
+                    sources = mergedSources,
+                    maxEnrich = 2,
+                    fetcher = fetcher
+                )
+            }
+
+            val contributingEngineNames = perEngineResults
+                .filter { it.second.isNotEmpty() }
+                .map { it.first.labelAr }
+            val winningEngineLabel = contributingEngineNames.joinToString(" + ")
 
             val totalElapsedMs = (clockMs() - startTimeMs).coerceAtLeast(1L)
 
-            val outcome = if (deduped.isEmpty()) {
+            val outcome = if (mergedSources.isEmpty()) {
                 val reason = if (errors.isNotEmpty()) " (${errors.joinToString("؛ ")})" else ""
                 WebSearchOutcome(
                     query = cleanQuery,
                     summaryText = "ملقتش نتائج متاحة عن «$cleanQuery»$reason.",
                     sources = emptyList(),
-                    errorAr = "محرك البحث غير متاح أو مرجعش نتائج حالياً$reason.",
-                    engineUsed = winningEngine.ifBlank { enginesToTry.first().labelAr },
-                    responseTimeMs = totalElapsedMs
+                    errorAr = "محركات البحث غير متاحة أو مرجعتش نتائج حالياً$reason.",
+                    engineUsed = winningEngineLabel.ifBlank { enginesToRun.first().labelAr },
+                    responseTimeMs = totalElapsedMs,
+                    perEngineReports = reports
                 )
             } else {
-                val top = deduped.first()
+                val top = mergedSources.first()
                 val summary = if (top.snippet.isNotBlank()) {
                     "${top.title}: ${top.snippet}"
                 } else {
@@ -227,14 +343,15 @@ object OnlineSearchManager {
                 WebSearchOutcome(
                     query = cleanQuery,
                     summaryText = summary.take(520),
-                    sources = deduped,
+                    sources = mergedSources,
                     fromCache = false,
-                    engineUsed = winningEngine,
-                    responseTimeMs = totalElapsedMs
+                    engineUsed = winningEngineLabel,
+                    responseTimeMs = totalElapsedMs,
+                    perEngineReports = reports
                 )
             }
 
-            if (deduped.isNotEmpty()) {
+            if (mergedSources.isNotEmpty()) {
                 synchronized(cacheLock) {
                     lruCache[cacheKey] = CacheEntry(outcome, clockMs())
                 }
@@ -252,6 +369,239 @@ object OnlineSearchManager {
         } finally {
             CheetahRuntimeBus.setNetworkSearching(false)
         }
+    }
+
+    /**
+     * Merges and ranks results from one or more engines using Reciprocal Rank Fusion (RRF)
+     * plus a multi-engine corroboration bonus, collapsing duplicate URLs / domain+title pairs.
+     */
+    fun mergeAndRankRrf(
+        perEngineResults: List<Pair<ConcreteSearchEngine, List<WebSearchSource>>>,
+        maxItems: Int = 6,
+        rrfK: Double = 60.0
+    ): List<WebSearchSource> {
+        if (perEngineResults.isEmpty()) return emptyList()
+
+        data class Accumulator(
+            var canonical: WebSearchSource,
+            var rrfScore: Double,
+            val engines: LinkedHashSet<String>,
+            val orderTieBreak: Int
+        )
+
+        val buckets = LinkedHashMap<String, Accumulator>()
+        var arrivalIdx = 0
+
+        perEngineResults.forEachIndexed { engineOrderIdx, (engine, hits) ->
+            hits.filter { it.title.isNotBlank() || it.snippet.isNotBlank() }
+                .forEachIndexed { rankIdx, src ->
+                    val normUrl = normalizeUrlForDedup(src.url)
+                    val domain = src.sourceDomain.ifBlank { extractDomain(src.url) }
+                    val cleanTitleKey = src.title.trim().lowercase().replace(Regex("\\s+"), " ")
+                    val dedupKey = if (normUrl.isNotBlank()) normUrl else "$domain|$cleanTitleKey"
+
+                    val rank = rankIdx + 1
+                    val rrfContribution = 1.0 / (rrfK + rank)
+                    val tiePenalty = engineOrderIdx * 0.0001
+                    val engineLabel = engine.labelAr
+
+                    val existing = buckets[dedupKey]
+                    if (existing == null) {
+                        val normalizedSrc = src.copy(
+                            sourceDomain = domain,
+                            engineName = src.engineName.ifBlank { engineLabel },
+                            contributingEngines = (src.contributingEngines + engineLabel).distinct()
+                        )
+                        buckets[dedupKey] = Accumulator(
+                            canonical = normalizedSrc,
+                            rrfScore = rrfContribution - tiePenalty,
+                            engines = linkedSetOf(engineLabel),
+                            orderTieBreak = arrivalIdx++
+                        )
+                    } else {
+                        val isNewEngine = existing.engines.add(engineLabel)
+                        existing.rrfScore += rrfContribution
+                        if (isNewEngine) {
+                            existing.rrfScore += 0.020 // Multi-engine corroboration boost
+                        }
+                        // Keep richer snippet / non-null published date
+                        val cur = existing.canonical
+                        val bestSnippet = if (src.snippet.length > cur.snippet.length) src.snippet else cur.snippet
+                        val bestDate = cur.publishedDate ?: src.publishedDate
+                        val mergedEngines = existing.engines.toList()
+                        existing.canonical = cur.copy(
+                            snippet = bestSnippet,
+                            publishedDate = bestDate,
+                            provider = mergedEngines.joinToString(" + "),
+                            contributingEngines = mergedEngines
+                        )
+                    }
+                }
+        }
+
+        // Also collapse near-duplicate domain+title entries produced under slightly different URL paths
+        val finalBuckets = LinkedHashMap<String, Accumulator>()
+        for (acc in buckets.values) {
+            val domainTitleKey = "${acc.canonical.sourceDomain.lowercase()}|${acc.canonical.title.trim().lowercase()}"
+            val prior = finalBuckets[domainTitleKey]
+            if (prior == null || acc.canonical.title.isBlank()) {
+                finalBuckets[domainTitleKey + "#" + acc.orderTieBreak] = acc
+            } else {
+                // Exact same domain & title already seen
+                val addedEngines = acc.engines.filter { prior.engines.add(it) }
+                prior.rrfScore += acc.rrfScore + (addedEngines.size * 0.015)
+                val bestSnippet = if (acc.canonical.snippet.length > prior.canonical.snippet.length) {
+                    acc.canonical.snippet
+                } else {
+                    prior.canonical.snippet
+                }
+                val mergedEngines = prior.engines.toList()
+                prior.canonical = prior.canonical.copy(
+                    snippet = bestSnippet,
+                    publishedDate = prior.canonical.publishedDate ?: acc.canonical.publishedDate,
+                    provider = mergedEngines.joinToString(" + "),
+                    contributingEngines = mergedEngines
+                )
+            }
+        }
+
+        return finalBuckets.values
+            .sortedWith(
+                compareByDescending<Accumulator> { it.rrfScore }
+                    .thenBy { it.orderTieBreak }
+            )
+            .take(maxItems.coerceAtLeast(1))
+            .map { acc ->
+                val list = acc.engines.toList()
+                acc.canonical.copy(
+                    contributingEngines = list,
+                    provider = if (list.size > 1) list.joinToString(" + ") else acc.canonical.provider
+                )
+            }
+    }
+
+    /**
+     * Fetches a cleaned, short HTTPS page excerpt capped at <= 120 KB, stripping navigation,
+     * scripts, styles, footers, ads, and raw HTML. Never throws; returns null on non-HTTPS or failure.
+     */
+    fun fetchReadablePageExcerpt(
+        rawUrl: String,
+        fetcher: (String) -> String = { url -> httpGetHttps(url, MAX_PAGE_EXCERPT_BYTES, PAGE_CONNECT_TIMEOUT_MS, PAGE_READ_TIMEOUT_MS) },
+        maxExcerptChars: Int = 550
+    ): String? {
+        if (!isValidHttpsUrl(rawUrl)) return null
+        val html = runCatching { fetcher(rawUrl) }.getOrNull()?.take(MAX_PAGE_EXCERPT_BYTES) ?: return null
+        if (html.isBlank()) return null
+
+        val cleaned = html
+            .replace(Regex("(?is)<(script|style|nav|footer|aside|header|form|noscript|svg|iframe)[^>]*>.*?</\\1>"), " ")
+            .replace(Regex("(?is)<!--.*?-->"), " ")
+            .let { stripHtmlTags(it) }
+            .replace(Regex("(?i)(cookie policy|accept all cookies|privacy policy|sign up for our newsletter|advertisement|skip to content)"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+        return cleaned.takeIf { it.length >= 45 }?.take(maxExcerptChars)
+    }
+
+    private suspend fun enrichTopSourcesWithExcerpts(
+        sources: List<WebSearchSource>,
+        maxEnrich: Int,
+        fetcher: (String) -> String
+    ): List<WebSearchSource> = coroutineScope {
+        val indicesToFetch = sources.mapIndexedNotNull { idx, src ->
+            val domain = extractDomain(src.url)
+            val alreadyRichWikipedia = domain.endsWith("wikipedia.org") && src.snippet.length >= 160
+            if (isValidHttpsUrl(src.url) && !alreadyRichWikipedia) idx else null
+        }.take(maxEnrich)
+
+        if (indicesToFetch.isEmpty()) return@coroutineScope sources
+
+        val excerptByIndex = indicesToFetch.map { idx ->
+            async {
+                val excerpt = withTimeoutOrNull(4_500L) {
+                    fetchReadablePageExcerpt(sources[idx].url, fetcher = fetcher)
+                }
+                idx to excerpt
+            }
+        }.awaitAll().toMap()
+
+        sources.mapIndexed { idx, src ->
+            val excerpt = excerptByIndex[idx]
+            if (!excerpt.isNullOrBlank() && excerpt.length > src.snippet.length) {
+                src.copy(snippet = excerpt)
+            } else {
+                src
+            }
+        }
+    }
+
+    private suspend fun runSingleEngineWithReport(
+        engine: ConcreteSearchEngine,
+        orderIndex: Int,
+        cleanQuery: String,
+        encodedQuery: String,
+        isArabic: Boolean,
+        customSearxngUrl: String,
+        maxItems: Int,
+        timeoutMs: Long,
+        clockMs: () -> Long,
+        fetcher: (String) -> String
+    ): EngineExecutionOutcome {
+        if (engine == ConcreteSearchEngine.SEARXNG && !isValidHttpsUrl(customSearxngUrl)) {
+            return EngineExecutionOutcome(
+                engine = engine,
+                orderIndex = orderIndex,
+                hits = emptyList(),
+                report = PerEngineTestReport(
+                    engineName = engine.labelAr,
+                    success = false,
+                    resultCount = 0,
+                    elapsedMs = 0L,
+                    note = "رابط غير مضبوط"
+                )
+            )
+        }
+
+        val t0 = clockMs()
+        var errorNote = ""
+        val hits: List<WebSearchSource>? = withTimeoutOrNull(timeoutMs.coerceAtLeast(500L)) {
+            runCatching {
+                executeEngine(
+                    engine = engine,
+                    cleanQuery = cleanQuery,
+                    encodedQuery = encodedQuery,
+                    isArabic = isArabic,
+                    customSearxngUrl = customSearxngUrl,
+                    maxItems = maxItems,
+                    fetcher = fetcher
+                )
+            }.getOrElse { err ->
+                errorNote = err.message ?: "تعذر الاتصال"
+                emptyList()
+            }
+        }
+        val elapsed = (clockMs() - t0).coerceAtLeast(1L)
+        val safeHits = hits ?: emptyList()
+        if (hits == null) {
+            errorNote = "انتهت المهلة"
+        } else if (safeHits.isEmpty() && errorNote.isBlank()) {
+            errorNote = "لا توجد نتائج"
+        }
+
+        val report = PerEngineTestReport(
+            engineName = engine.labelAr,
+            success = errorNote.isBlank() || safeHits.isNotEmpty(),
+            resultCount = safeHits.size,
+            elapsedMs = elapsed,
+            note = if (safeHits.isNotEmpty()) "" else errorNote
+        )
+        return EngineExecutionOutcome(
+            engine = engine,
+            orderIndex = orderIndex,
+            hits = safeHits,
+            report = report
+        )
     }
 
     suspend fun testSearxngConnection(
@@ -322,6 +672,8 @@ object OnlineSearchManager {
             maxResults = 5,
             searchEngineMode = settings.searchEngineMode,
             autoSearchOrder = settings.autoSearchOrder,
+            enabledEngines = settings.enabledSearchEngines,
+            fetchPageExcerpts = false,
             bypassCache = true,
             clockMs = clockMs,
             fetcher = fetcher
@@ -333,7 +685,8 @@ object OnlineSearchManager {
                 messageAr = "نجح البحث عبر ${outcome.engineUsed}: ${outcome.sources.size} نتيجة خلال $elapsed مللي ثانية.",
                 resultCount = outcome.sources.size,
                 responseTimeMs = elapsed,
-                engineUsed = outcome.engineUsed
+                engineUsed = outcome.engineUsed,
+                perEngineReports = outcome.perEngineReports
             )
         } else {
             SearchEngineTestResult(
@@ -341,7 +694,8 @@ object OnlineSearchManager {
                 messageAr = outcome.errorAr ?: "لم ترجع نتائج للمعاينة ($elapsed مللي ثانية).",
                 resultCount = 0,
                 responseTimeMs = elapsed,
-                engineUsed = outcome.engineUsed
+                engineUsed = outcome.engineUsed,
+                perEngineReports = outcome.perEngineReports
             )
         }
     }
@@ -366,6 +720,7 @@ object OnlineSearchManager {
         return when (engine) {
             ConcreteSearchEngine.DUCKDUCKGO -> queryDuckDuckGo(encodedQuery, maxItems, fetcher)
             ConcreteSearchEngine.WIKIPEDIA -> queryWikipediaAutoLang(encodedQuery, isArabic, fetcher)
+            ConcreteSearchEngine.MOJEEK -> queryMojeek(encodedQuery, maxItems, fetcher)
             ConcreteSearchEngine.SEARXNG -> {
                 val base = customSearxngUrl.trim().trimEnd('/')
                 val lang = if (isArabic) "ar" else "en"
@@ -392,7 +747,52 @@ object OnlineSearchManager {
                 parseDuckDuckGoHtml(fetcher(htmlUrl), maxItems = maxItems)
             }.onSuccess { out.addAll(it) }
         }
-        return out.distinctBy { it.url.ifBlank { it.title } }.take(maxItems)
+        return out.distinctBy { normalizeUrlForDedup(it.url).ifBlank { it.title } }.take(maxItems)
+    }
+
+    private fun queryMojeek(
+        encodedQuery: String,
+        maxItems: Int,
+        fetcher: (String) -> String
+    ): List<WebSearchSource> {
+        val url = "https://www.mojeek.com/search?q=$encodedQuery"
+        val html = fetcher(url)
+        return parseMojeekHtml(html, maxItems = maxItems)
+    }
+
+    /**
+     * Graceful parser for Mojeek public HTML search results (`https://www.mojeek.com/search?q=...`).
+     * Returns emptyList() safely if layout changes or HTML is malformed.
+     */
+    fun parseMojeekHtml(html: String, maxItems: Int = 5): List<WebSearchSource> {
+        if (html.isBlank()) return emptyList()
+        val out = mutableListOf<WebSearchSource>()
+        for (blockMatch in MOJEEK_BLOCK_REGEX.findAll(html)) {
+            if (out.size >= maxItems) break
+            val block = blockMatch.groupValues.getOrNull(1).orEmpty()
+            val linkMatch = MOJEEK_LINK_REGEX.find(block) ?: continue
+            val url = linkMatch.groupValues.getOrNull(1).orEmpty().trim()
+            if (!isValidHttpsUrl(url)) continue
+            val title = stripHtmlTags(linkMatch.groupValues.getOrNull(2).orEmpty())
+            val snippet = stripHtmlTags(
+                MOJEEK_SNIPPET_REGEX.find(block)?.groupValues?.getOrNull(1).orEmpty()
+            )
+            if (title.isBlank() && snippet.isBlank()) continue
+            val dateHint = Regex("\\[(20\\d{2}-\\d{2}-\\d{2})\\]").find(snippet)?.groupValues?.getOrNull(1)
+            out.add(
+                WebSearchSource(
+                    title = title.ifBlank { extractDomain(url) },
+                    snippet = snippet.ifBlank { title },
+                    url = url,
+                    provider = "Mojeek",
+                    sourceDomain = extractDomain(url),
+                    publishedDate = dateHint,
+                    engineName = "Mojeek",
+                    contributingEngines = listOf("Mojeek")
+                )
+            )
+        }
+        return out
     }
 
     private fun queryWikipediaAutoLang(
@@ -443,7 +843,8 @@ object OnlineSearchManager {
                         provider = "Wikipedia ($lang)",
                         sourceDomain = "$lang.wikipedia.org",
                         publishedDate = dateHint,
-                        engineName = "Wikipedia"
+                        engineName = "Wikipedia",
+                        contributingEngines = listOf("Wikipedia")
                     )
                 )
             }
@@ -469,7 +870,8 @@ object OnlineSearchManager {
                     provider = if (abstractSource.isNotBlank()) "DuckDuckGo ($abstractSource)" else "DuckDuckGo",
                     sourceDomain = extractDomain(safeUrl),
                     publishedDate = null,
-                    engineName = "DuckDuckGo"
+                    engineName = "DuckDuckGo",
+                    contributingEngines = listOf("DuckDuckGo")
                 )
             )
         }
@@ -489,7 +891,8 @@ object OnlineSearchManager {
                             provider = "DuckDuckGo",
                             sourceDomain = extractDomain(safeUrl),
                             publishedDate = null,
-                            engineName = "DuckDuckGo"
+                            engineName = "DuckDuckGo",
+                            contributingEngines = listOf("DuckDuckGo")
                         )
                     )
                 }
@@ -498,10 +901,6 @@ object OnlineSearchManager {
         return out
     }
 
-    /**
-     * Graceful parser for DuckDuckGo public HTML results endpoint (`html.duckduckgo.com/html/`).
-     * Returns emptyList() safely if page layout changes or markup is malformed.
-     */
     fun parseDuckDuckGoHtml(html: String, maxItems: Int = 5): List<WebSearchSource> {
         if (html.isBlank()) return emptyList()
         val linkMatches = DDG_HTML_LINK_REGEX.findAll(html).toList()
@@ -524,7 +923,8 @@ object OnlineSearchManager {
                     provider = "DuckDuckGo",
                     sourceDomain = extractDomain(resolvedUrl),
                     publishedDate = null,
-                    engineName = "DuckDuckGo"
+                    engineName = "DuckDuckGo",
+                    contributingEngines = listOf("DuckDuckGo")
                 )
             )
         }
@@ -567,7 +967,8 @@ object OnlineSearchManager {
                     provider = if (subEngine.isNotBlank()) "SearXNG ($subEngine)" else "SearXNG",
                     sourceDomain = extractDomain(url),
                     publishedDate = dateHint,
-                    engineName = "SearXNG"
+                    engineName = "SearXNG",
+                    contributingEngines = listOf("SearXNG")
                 )
             )
         }
@@ -588,15 +989,20 @@ object OnlineSearchManager {
             .trim()
     }
 
-    private fun httpGetHttps(rawUrl: String): String {
+    private fun httpGetHttps(
+        rawUrl: String,
+        maxChars: Int = 262_144,
+        connectTimeoutMs: Int = CONNECT_TIMEOUT_MS,
+        readTimeoutMs: Int = READ_TIMEOUT_MS
+    ): String {
         val url = URL(rawUrl)
         require(url.protocol.equals("https", ignoreCase = true)) {
             "Only HTTPS search endpoints are permitted."
         }
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
-            connectTimeout = CONNECT_TIMEOUT_MS
-            readTimeout = READ_TIMEOUT_MS
+            connectTimeout = connectTimeoutMs
+            readTimeout = readTimeoutMs
             instanceFollowRedirects = true
             setRequestProperty("User-Agent", USER_AGENT)
             setRequestProperty("Accept", "application/json,text/html;q=0.8")
@@ -610,8 +1016,9 @@ object OnlineSearchManager {
                 val sb = StringBuilder()
                 val buf = CharArray(4096)
                 var total = 0
-                while (total < 262_144) {
-                    val n = reader.read(buf)
+                while (total < maxChars) {
+                    val toRead = minOf(buf.size, maxChars - total)
+                    val n = reader.read(buf, 0, toRead)
                     if (n <= 0) break
                     sb.append(buf, 0, n)
                     total += n
@@ -661,7 +1068,7 @@ object OnlineSearchManager {
 
             private fun readObject(): Map<String, Any?> {
                 val map = LinkedHashMap<String, Any?>()
-                pos++ // '{'
+                pos++
                 skipWs()
                 if (pos < src.length && src[pos] == '}') {
                     pos++
@@ -688,7 +1095,7 @@ object OnlineSearchManager {
 
             private fun readArray(): List<Any?> {
                 val list = ArrayList<Any?>()
-                pos++ // '['
+                pos++
                 skipWs()
                 if (pos < src.length && src[pos] == ']') {
                     pos++
@@ -708,7 +1115,7 @@ object OnlineSearchManager {
             }
 
             private fun readString(): String {
-                pos++ // '"'
+                pos++
                 val sb = StringBuilder()
                 while (pos < src.length) {
                     val ch = src[pos++]

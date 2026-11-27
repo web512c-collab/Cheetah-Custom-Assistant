@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Architecture
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -29,11 +30,15 @@ import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -49,6 +54,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.example.controller.PermissionHealthChecker
+import com.example.ui.screens.AboutScreen
 import com.example.ui.screens.ArchitectureScreen
 import com.example.ui.screens.ConsoleScreen
 import com.example.ui.screens.GgufStorageModeDialog
@@ -62,10 +68,14 @@ import com.example.ui.viewmodel.AssistantViewModel
 import com.example.voice.BootCompletedReceiver
 import com.example.voice.CheetahRuntimeBus
 import com.example.voice.EgyptianTtsManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private const val ROUTE_CONSOLE = "console"
 private const val ROUTE_SETTINGS = "settings"
 private const val ROUTE_ARCHITECTURE = "architecture"
+private const val ROUTE_ABOUT = "about"
 
 private data class NavDestination(
     val route: String,
@@ -77,7 +87,8 @@ private data class NavDestination(
 private val CHEETAH_DESTINATIONS = listOf(
     NavDestination(ROUTE_CONSOLE, "القيادة", Icons.Default.GraphicEq, "nav_console"),
     NavDestination(ROUTE_SETTINGS, "الإعدادات", Icons.Default.Settings, "nav_settings"),
-    NavDestination(ROUTE_ARCHITECTURE, "الهندسة", Icons.Default.Architecture, "nav_architecture")
+    NavDestination(ROUTE_ARCHITECTURE, "الهندسة", Icons.Default.Architecture, "nav_architecture"),
+    NavDestination(ROUTE_ABOUT, "عن التطبيق", Icons.Default.Info, "nav_about")
 )
 
 private tailrec fun Context.findActivity(): Activity? = when (this) {
@@ -129,6 +140,8 @@ fun CheetahAppRoot(
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route ?: ROUTE_CONSOLE
+    val snackbarHostState = remember { SnackbarHostState() }
+    val uiScope = rememberCoroutineScope()
 
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val rules by viewModel.rules.collectAsStateWithLifecycle()
@@ -205,6 +218,54 @@ fun CheetahAppRoot(
         }
     }
 
+    val exportAiConfigLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            uiScope.launch {
+                val res = runCatching {
+                    val json = viewModel.exportAiConfigJson()
+                    withContext(Dispatchers.IO) {
+                        context.contentResolver.openOutputStream(uri)?.use { stream ->
+                            stream.write(json.toByteArray(Charsets.UTF_8))
+                        } ?: error("تعذر فتح ملف الحفظ.")
+                    }
+                }
+                snackbarHostState.showSnackbar(
+                    res.fold(
+                        onSuccess = { "تم تصدير إعدادات الذكاء (JSON) بنجاح." },
+                        onFailure = { "فشل التصدير: ${it.message ?: "خطأ غير معروف"}" }
+                    )
+                )
+            }
+        }
+    }
+
+    val importAiConfigLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            uiScope.launch {
+                val res = runCatching {
+                    val raw = withContext(Dispatchers.IO) {
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            val bytes = input.readBytes()
+                            require(bytes.size <= 65_536) { "حجم الملف أكبر من 64 KB." }
+                            bytes.toString(Charsets.UTF_8)
+                        } ?: error("تعذر قراءة الملف المختار.")
+                    }
+                    viewModel.importAiConfigJson(raw).getOrThrow()
+                }
+                snackbarHostState.showSnackbar(
+                    res.fold(
+                        onSuccess = { "تم استيراد وتطبيق إعدادات الذكاء بنجاح." },
+                        onFailure = { "ملف غير صالح: ${it.message ?: "خطأ في التنسيق"}" }
+                    )
+                )
+            }
+        }
+    }
+
     // Bug A3 compliant permission switch handlers: never re-prompt if granted; route permanent denial to App Info
     val handleMicSwitchToggle: (Boolean) -> Unit = { wantOn ->
         if (!wantOn) {
@@ -268,6 +329,7 @@ fun CheetahAppRoot(
 
         Scaffold(
             containerColor = CheetahObsidian,
+            snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
             bottomBar = {
                 if (!useRail) {
                     NavigationBar(containerColor = CheetahSlate) {
@@ -443,13 +505,6 @@ fun CheetahAppRoot(
                                         )
                                     }
                                 },
-                                onToggleOverlaySwitch = {
-                                    runCatching {
-                                        context.startActivity(
-                                            PermissionHealthChecker.buildOverlayPermissionIntent(context)
-                                        )
-                                    }
-                                },
                                 onOpenAppSettings = {
                                     runCatching {
                                         context.startActivity(
@@ -469,6 +524,36 @@ fun CheetahAppRoot(
                                 onUpdateAiBrainConfig = { useGen, mode, judge, evalCnt, showReason, showSrc, maxSec, prof, unloadMin ->
                                     viewModel.updateAiBrainConfig(useGen, mode, judge, evalCnt, showReason, showSrc, maxSec, prof, unloadMin)
                                 },
+                                onApplyAiPreset = { preset -> viewModel.applyAiPreset(preset) },
+                                onUpdateExpandedAiConfig = { topP, topK, minP, rep, seed, batch, tmpl, prompt, style, spokenChars, lang, stops, strip ->
+                                    viewModel.updateExpandedAiConfig(
+                                        topP = topP,
+                                        topK = topK,
+                                        minP = minP,
+                                        repeatPenalty = rep,
+                                        seed = seed,
+                                        batchSize = batch,
+                                        chatTemplateOverride = tmpl,
+                                        customSystemPrompt = prompt,
+                                        responseStyle = style,
+                                        spokenMaxChars = spokenChars,
+                                        aiLanguagePreference = lang,
+                                        stopSequences = stops,
+                                        stripReasoningTags = strip
+                                    )
+                                },
+                                onResetAiDefaults = {
+                                    viewModel.resetAiDefaults()
+                                    uiScope.launch {
+                                        snackbarHostState.showSnackbar("تمت إعادة ضبط إعدادات الذكاء مع الإبقاء على نموذجك.")
+                                    }
+                                },
+                                onExportAiConfig = {
+                                    exportAiConfigLauncher.launch("sheeta-ai-config.json")
+                                },
+                                onImportAiConfig = {
+                                    importAiConfigLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
+                                },
                                 onUpdateDomainLists = { trusted, untrusted ->
                                     viewModel.updateDomainLists(trusted, untrusted)
                                 },
@@ -476,6 +561,8 @@ fun CheetahAppRoot(
                                 onSetInternetSearch = { en, url -> viewModel.setInternetSearch(en, url) },
                                 onSelectSearchEngine = { mode -> viewModel.selectSearchEngine(mode) },
                                 onUpdateAutoSearchOrder = { order -> viewModel.updateAutoSearchOrder(order) },
+                                onToggleSearchEngine = { eng, en -> viewModel.toggleSearchEngineEnabled(eng, en) },
+                                onToggleFetchPageExcerpts = { en -> viewModel.setFetchPageExcerpts(en) },
                                 onTestSearxngConnection = { url -> viewModel.testSearxngConnection(url) },
                                 onTestSearchEngine = { viewModel.testSearchWithSelectedEngine() },
                                 onRunMicDiagnosticTest = { viewModel.runControlledMicDiagnosticTest() },
@@ -497,6 +584,10 @@ fun CheetahAppRoot(
                                 internetSearchEnabled = settings.internetSearchEnabled,
                                 localLlmStatus = localLlmStatus
                             )
+                        }
+
+                        composable(ROUTE_ABOUT) {
+                            AboutScreen()
                         }
                     }
                 }

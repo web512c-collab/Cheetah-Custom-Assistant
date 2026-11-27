@@ -1,6 +1,7 @@
 package com.example.llm
 
 import com.example.core.model.ChatTemplateFamily
+import com.example.core.model.ChatTemplateOverride
 import com.example.core.model.ConversationTurnMessage
 
 /**
@@ -46,7 +47,21 @@ object ChatTemplateFormatter {
         }
     }
 
-    fun buildTemplateWarning(rawTemplate: String?, family: ChatTemplateFamily): String? {
+    fun resolveEffectiveFamily(
+        detected: ChatTemplateFamily,
+        override: ChatTemplateOverride = ChatTemplateOverride.AUTO
+    ): ChatTemplateFamily = override.toFamilyOrNull() ?: detected
+
+    fun buildTemplateWarning(
+        rawTemplate: String?,
+        family: ChatTemplateFamily,
+        override: ChatTemplateOverride = ChatTemplateOverride.AUTO
+    ): String? {
+        val forced = override.toFamilyOrNull()
+        if (forced != null && family.isKnown && forced != family) {
+            return "تحذير: اخترت قالب ${forced.displayName} يدوياً، بينما الملف يشير إلى ${family.displayName}. تأكد أنه يطابق النموذج."
+        }
+        if (forced != null) return null
         return when {
             rawTemplate.isNullOrBlank() && family == ChatTemplateFamily.GENERIC_UNKNOWN ->
                 "لم يتم العثور على قالب محادثة (chat_template) داخل ملف GGUF — سيتم استخدام تنسيق عام آمن وقد تختلف جودة الردود."

@@ -10,7 +10,6 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.VIBRATE" />
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -46,7 +45,7 @@
     </queries>
 
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
@@ -125,12 +124,6 @@
         <!-- Local Bundled Acoustic Model ('يا شيتا') + Voice Match Foreground Service -->
         <service
             android:name=".voice.WakeWordDetectionService"
-            android:exported="false"
-            android:foregroundServiceType="microphone" />
-
-        <!-- Backward-compatibility wrapper delegating to WakeWordDetectionService -->
-        <service
-            android:name=".voice.CheetahWakeWordService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
 

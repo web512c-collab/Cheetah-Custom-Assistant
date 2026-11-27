@@ -70,6 +70,12 @@ class LocalLlmManager(
 
     @Volatile
     private var cancelledByUser = false
+    @Volatile
+    private var loadedCtxLen = 0
+    @Volatile
+    private var loadedThreads = 0
+    @Volatile
+    private var loadedBatchSize = 0
 
     fun refreshStorageAndMemoryTelemetry(config: LocalLlmConfig? = null) {
         val stat = StatFs(appContext.filesDir.absolutePath)
@@ -82,6 +88,11 @@ class LocalLlmManager(
         val health = DeviceHealthMonitor.inspect(appContext)
 
         val effectiveCtx = config?.let { resolveEffectiveContextLength(it, health.isThermalThrottled, health.isBatteryLow) } ?: 1024
+        val estimatedRamMb = if (config != null && config.fileSizeBytes > 0L) {
+            val weightsMb = config.fileSizeBytes / (1024L * 1024L)
+            val kvEstimateMb = ((effectiveCtx * 128L) / 1024L) + 128L
+            weightsMb + kvEstimateMb
+        } else 0L
         val ramWarning = if (config != null && config.fileSizeBytes > 0L) {
             GgufHeaderParser.evaluateRamSafety(
                 fileSizeBytes = config.fileSizeBytes,
@@ -92,7 +103,11 @@ class LocalLlmManager(
         } else null
 
         val tmplWarning = if (config != null && (config.displayName.isNotBlank() || config.modelUri.isNotBlank())) {
-            ChatTemplateFormatter.buildTemplateWarning(config.chatTemplateRaw, config.chatTemplateFamily)
+            ChatTemplateFormatter.buildTemplateWarning(
+                rawTemplate = config.chatTemplateRaw,
+                family = config.chatTemplateFamily,
+                override = config.chatTemplateOverride
+            )
         } else null
 
         CheetahRuntimeBus.updateLocalLlmStatus { cur ->
@@ -101,6 +116,8 @@ class LocalLlmManager(
                 freeInternalBytes = freeBytes,
                 availableRamMb = availMb,
                 totalRamMb = totalMb,
+                estimatedRamMb = estimatedRamMb,
+                loadedContextLen = loadedCtxLen,
                 ramWarningAr = ramWarning,
                 templateWarningAr = tmplWarning,
                 deviceHealth = health
@@ -232,10 +249,20 @@ class LocalLlmManager(
     }
 
     suspend fun ensureModelLoadedIfConfigured(): Result<Unit> {
-        if (isModelLoaded()) return Result.success(Unit)
         val cfg = settingsRepo.currentSettings().localLlmConfig
         if (!hasConfiguredModel(cfg)) {
             return Result.failure(IllegalStateException("لم يتم اختيار ملف GGUF."))
+        }
+        val health = DeviceHealthMonitor.inspect(appContext)
+        val effCtx = resolveEffectiveContextLength(cfg, health.isThermalThrottled, health.isBatteryLow)
+        val effThreads = resolveEffectiveThreads(cfg, health.isThermalThrottled, health.isBatteryLow)
+        val effBatch = cfg.batchSize.coerceIn(32, minOf(effCtx, 1024))
+        if (isModelLoaded() &&
+            loadedCtxLen == effCtx &&
+            loadedThreads == effThreads &&
+            loadedBatchSize == effBatch
+        ) {
+            return Result.success(Unit)
         }
         return loadConfiguredModel()
     }
@@ -264,6 +291,7 @@ class LocalLlmManager(
             val health = statusSnap.deviceHealth
             val effCtx = resolveEffectiveContextLength(cfg, health.isThermalThrottled, health.isBatteryLow)
             val effThreads = resolveEffectiveThreads(cfg, health.isThermalThrottled, health.isBatteryLow)
+            val effBatch = cfg.batchSize.coerceIn(32, minOf(effCtx, 1024))
 
             val ramCheck = GgufHeaderParser.evaluateRamSafety(
                 fileSizeBytes = cfg.fileSizeBytes,
@@ -293,7 +321,8 @@ class LocalLlmManager(
                         LlamaNativeBridge.nativeLoadModelFromPath(
                             path = cfg.internalPath,
                             contextLen = effCtx,
-                            threads = effThreads
+                            threads = effThreads,
+                            batchSize = effBatch
                         )
                     }
                     cfg.modelUri.isNotBlank() -> {
@@ -307,7 +336,8 @@ class LocalLlmManager(
                             val ok = LlamaNativeBridge.nativeLoadModelFromFd(
                                 fd = pfd.fd,
                                 contextLen = effCtx,
-                                threads = effThreads
+                                threads = effThreads,
+                                batchSize = effBatch
                             )
                             if (!ok) {
                                 runCatching { openPfd?.close() }
@@ -321,12 +351,20 @@ class LocalLlmManager(
             }.getOrDefault(false)
 
             if (loaded) {
+                loadedCtxLen = effCtx
+                loadedThreads = effThreads
+                loadedBatchSize = effBatch
+
                 val desc = runCatching { LlamaNativeBridge.nativeGetModelDescription() }.getOrDefault("")
                 val nativeTmpl = runCatching { LlamaNativeBridge.nativeGetChatTemplate() }.getOrDefault("")
                 val resolvedTmplRaw = nativeTmpl.ifBlank { cfg.chatTemplateRaw }
                 val resolvedArch = desc.ifBlank { cfg.architecture }
                 val resolvedFamily = ChatTemplateFormatter.detectTemplateFamily(resolvedTmplRaw, resolvedArch)
-                val tmplWarning = ChatTemplateFormatter.buildTemplateWarning(resolvedTmplRaw, resolvedFamily)
+                val tmplWarning = ChatTemplateFormatter.buildTemplateWarning(
+                    rawTemplate = resolvedTmplRaw,
+                    family = resolvedFamily,
+                    override = cfg.chatTemplateOverride
+                )
 
                 if (resolvedTmplRaw != cfg.chatTemplateRaw || resolvedFamily != cfg.chatTemplateFamily) {
                     settingsRepo.updateLocalLlmConfig(
@@ -341,6 +379,7 @@ class LocalLlmManager(
                 CheetahRuntimeBus.updateLocalLlmStatus {
                     it.copy(
                         loadState = LocalLlmLoadState.LOADED,
+                        loadedContextLen = effCtx,
                         metadata = GgufModelMetadata(
                             displayName = cfg.displayName,
                             fileSizeBytes = cfg.fileSizeBytes,
@@ -455,13 +494,15 @@ class LocalLlmManager(
             if (reload.isFailure) {
                 return@withContext Result.failure(reload.exceptionOrNull() ?: IllegalStateException("النموذج المحلي غير محمّل."))
             }
+        } else {
+            ensureModelLoadedIfConfigured()
         }
 
         inferenceMutex.withLock {
             inactivityUnloadJob?.cancel()
             cancelledByUser = false
             val cfg = settings.localLlmConfig
-            val family = cfg.chatTemplateFamily
+            val family = ChatTemplateFormatter.resolveEffectiveFamily(cfg.chatTemplateFamily, cfg.chatTemplateOverride)
             val formattedPrompt = ChatTemplateFormatter.formatPrompt(
                 family = family,
                 systemPrompt = systemPrompt,
@@ -517,17 +558,28 @@ class LocalLlmManager(
             }
 
             return@withLock try {
+                val stopArray = cfg.stopSequences.takeIf { it.isNotEmpty() }?.toTypedArray()
                 val rawOut = LlamaNativeBridge.nativeGenerateRawStream(
                     formattedPrompt = formattedPrompt,
                     maxTokens = modeMaxTokens,
                     temperature = modeTemp,
+                    topP = cfg.topP,
+                    topK = cfg.topK,
+                    minP = cfg.minP,
+                    repeatPenalty = cfg.repeatPenalty,
+                    seed = cfg.seed,
+                    stopSequences = stopArray,
                     gbnfGrammar = null,
                     reuseKvCache = reuseKvCache,
                     tokenCallback = object : LlamaTokenCallback {
                         override fun onToken(tokenText: String) {
                             tokenCount++
                             rawAcc.append(tokenText)
-                            val visibleSoFar = ReasoningOutputParser.extractVisibleStreamText(rawAcc.toString())
+                            val visibleSoFar = if (cfg.stripReasoningTags) {
+                                ReasoningOutputParser.extractVisibleStreamText(rawAcc.toString())
+                            } else {
+                                rawAcc.toString()
+                            }
                             CheetahRuntimeBus.setStreamingReplyText(visibleSoFar)
                             onVisibleStreamText(visibleSoFar)
 
@@ -573,14 +625,15 @@ class LocalLlmManager(
                 }
                 scheduleAutoUnloadTimer(cfg.autoUnloadMinutes)
 
-                val combinedRaw = rawOut.ifBlank { rawAcc.toString() }.trim()
+                val combinedRaw = trimStopSequences(rawOut.ifBlank { rawAcc.toString() }.trim(), cfg.stopSequences)
                 val split = ReasoningOutputParser.splitReasoningAndAnswer(combinedRaw)
+                val baseAnswer = if (cfg.stripReasoningTags) split.finalAnswer else combinedRaw
                 val finalAnswer = when {
-                    timedOut && split.finalAnswer.isNotBlank() ->
-                        "${split.finalAnswer}\n\n(ملاحظة: انتهى الحد الأقصى لوقت التفكير (${cfg.maxThinkingSeconds} ثانية)، فده أفضل ملخص وصلتله لحد دلوقتي.)"
+                    timedOut && baseAnswer.isNotBlank() ->
+                        "${baseAnswer}\n\n(ملاحظة: انتهى الحد الأقصى لوقت التفكير (${cfg.maxThinkingSeconds} ثانية)، فده أفضل ملخص وصلتله لحد دلوقتي.)"
                     timedOut ->
                         "انتهى وقت التفكير المحدد (${cfg.maxThinkingSeconds} ثانية) قبل اكتمال الإجابة. جرب زيادة الحد من الإعدادات أو تفعيل الوضع السريع."
-                    else -> split.finalAnswer
+                    else -> baseAnswer
                 }
 
                 if (finalAnswer.isBlank() && split.reasoningText.isBlank()) {
@@ -590,7 +643,7 @@ class LocalLlmManager(
                         LlmGenerationResult(
                             rawText = combinedRaw,
                             visibleAnswer = finalAnswer.ifBlank { split.reasoningText },
-                            reasoningText = split.reasoningText,
+                            reasoningText = if (cfg.stripReasoningTags) split.reasoningText else "",
                             elapsedMs = elapsedMs,
                             tokensPerSec = tps,
                             timedOut = timedOut,
@@ -644,8 +697,10 @@ class LocalLlmManager(
         inferenceMutex.withLock {
             inactivityUnloadJob?.cancel()
             cancelledByUser = false
+            val cfg = settings.localLlmConfig
+            val family = ChatTemplateFormatter.resolveEffectiveFamily(cfg.chatTemplateFamily, cfg.chatTemplateOverride)
             val formatted = ChatTemplateFormatter.formatPrompt(
-                family = settings.localLlmConfig.chatTemplateFamily,
+                family = family,
                 systemPrompt = systemPrompt,
                 messages = listOf(ConversationTurnMessage("user", userPrompt))
             )
@@ -656,6 +711,12 @@ class LocalLlmManager(
                     formattedPrompt = formatted,
                     maxTokens = maxTokens,
                     temperature = 0.12f,
+                    topP = 0.90f,
+                    topK = 24,
+                    minP = 0.05f,
+                    repeatPenalty = 1.05f,
+                    seed = cfg.seed,
+                    stopSequences = cfg.stopSequences.takeIf { it.isNotEmpty() }?.toTypedArray(),
                     gbnfGrammar = gbnfGrammar.takeIf { it.isNotBlank() },
                     reuseKvCache = false,
                     tokenCallback = null
@@ -664,7 +725,7 @@ class LocalLlmManager(
                 CheetahRuntimeBus.updateLocalLlmStatus {
                     it.copy(isGenerating = false, isThinking = false, thinkingElapsedMs = elapsed)
                 }
-                scheduleAutoUnloadTimer(settings.localLlmConfig.autoUnloadMinutes)
+                scheduleAutoUnloadTimer(cfg.autoUnloadMinutes)
                 if (out.isBlank()) Result.failure(IllegalStateException("فشل إنتاج JSON من النموذج."))
                 else Result.success(out)
             } catch (t: Throwable) {
@@ -756,10 +817,23 @@ class LocalLlmManager(
         return cfg.contextLength.coerceIn(256, cap)
     }
 
+    private fun trimStopSequences(text: String, stopSequences: List<String>): String {
+        var result = text
+        for (stop in stopSequences) {
+            if (stop.isNotEmpty() && result.endsWith(stop)) {
+                result = result.removeSuffix(stop).trimEnd()
+            }
+        }
+        return result
+    }
+
     private fun unloadNativeOnly() {
         if (LlamaNativeBridge.isNativeAvailable) {
             runCatching { LlamaNativeBridge.nativeUnloadModel() }
         }
+        loadedCtxLen = 0
+        loadedThreads = 0
+        loadedBatchSize = 0
         runCatching { openPfd?.close() }
         openPfd = null
     }

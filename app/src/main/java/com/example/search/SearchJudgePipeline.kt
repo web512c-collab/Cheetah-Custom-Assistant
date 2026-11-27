@@ -86,13 +86,15 @@ object SearchJudgePipeline {
         title: String,
         domain: String,
         dateHint: String?,
-        passage: String
+        passage: String,
+        engines: List<String> = emptyList()
     ): String {
         val safeTitle = neutralizePromptInjection(title)
         val safePassage = neutralizePromptInjection(passage)
         return buildString {
             append(UNTRUSTED_START).append('\n')
             append("Source #").append(index).append(" | Domain: ").append(domain)
+            if (engines.isNotEmpty()) append(" | Engines: ").append(engines.joinToString("+"))
             if (!dateHint.isNullOrBlank()) append(" | Date: ").append(dateHint)
             append('\n')
             append("Title: ").append(safeTitle).append('\n')
@@ -291,25 +293,35 @@ object SearchJudgePipeline {
         if (!modelLoaded || !settings.localLlmConfig.judgeSearchWithAi || jsonEvaluator == null) {
             val top = candidates.first()
             val mapped = candidates.mapIndexed { i, c ->
+                val engineBoost = (c.source.contributingEngines.distinct().size - 1).coerceAtLeast(0)
                 JudgedSearchSource(
                     index = i + 1,
                     source = c.source,
                     domain = c.domain,
                     publishedDate = c.publishedDate,
-                    relevanceScore = 6 + minOf(3, c.trustedBoost),
-                    reliabilityScore = if (c.trustedBoost > 0) 7 else 5,
+                    relevanceScore = (6 + minOf(3, c.trustedBoost) + engineBoost).coerceAtMost(10),
+                    reliabilityScore = (if (c.trustedBoost > 0) 7 else 5) + minOf(2, engineBoost),
                     freshnessScore = if (c.publishedDate != null) 7 else 5,
                     verdict = SearchVerdict.SUPPORTS,
                     keyClaim = c.cleanText.take(160),
                     accepted = true
                 )
             } + preRejected
-            val text = "حسب ${top.source.provider} (${top.domain}): ${top.cleanText.take(320)}\n\n(ملاحظة: الإجابة دي مباشرة من نتائج البحث وماتراجعتش بالذكاء المحلي لأن مفيش نموذج محمّل حالياً.)"
+            val consensusCount = candidates.count { it.source.contributingEngines.distinct().size >= 2 }
+            val consensusNote = if (consensusCount > 0) {
+                " (أكدت $consensusCount نتيجة عبر أكثر من محرك بحث)"
+            } else ""
+            val text = "حسب ${top.source.provider} (${top.domain}): ${top.cleanText.take(320)}$consensusNote\n\n(ملاحظة: الإجابة دي مباشرة من نتائج البحث وماتراجعتش بالذكاء المحلي لأن مفيش نموذج محمّل حالياً.)"
             return VerifiedSearchAnswer(
                 answerText = text,
                 confidence = SearchConfidence.LOW,
                 judgedSources = mapped,
-                crossCheck = CrossCheckReport(acceptedCount = candidates.size, rejectedCount = preRejected.size),
+                crossCheck = CrossCheckReport(
+                    agreements = if (consensusCount > 0) listOf("تطابق في النتائج بين محركين أو أكثر ($consensusCount مصدر)") else emptyList(),
+                    acceptedCount = candidates.size,
+                    rejectedCount = preRejected.size,
+                    consensusCount = consensusCount
+                ),
                 judgedByAi = false
             )
         }
@@ -330,7 +342,8 @@ object SearchJudgePipeline {
                 title = item.source.title,
                 domain = item.domain,
                 dateHint = item.publishedDate,
-                passage = item.cleanText.take(360)
+                passage = item.cleanText.take(360),
+                engines = item.source.contributingEngines
             )
             val evalUser = "Query: $query\nEvaluate this single search result:\n$wrapped"
 
@@ -380,14 +393,20 @@ object SearchJudgePipeline {
         val accepted = judgedList.filter { it.accepted }
         val supporting = accepted.filter { it.verdict == SearchVerdict.SUPPORTS }
         val contradicting = accepted.filter { it.verdict == SearchVerdict.CONTRADICTS }
+        val consensusCount = accepted.count { it.source.contributingEngines.distinct().size >= 2 }
 
-        val agreements = supporting.map { "[${it.index}] ${it.keyClaim}" }
+        val agreements = supporting.map { src ->
+            val multi = src.source.contributingEngines.distinct()
+            if (multi.size >= 2) "[${src.index}] (${multi.joinToString("+")}) ${src.keyClaim}"
+            else "[${src.index}] ${src.keyClaim}"
+        }
         val conflicts = contradicting.map { "[${it.index}] ${it.keyClaim}" }
         val crossCheck = CrossCheckReport(
             agreements = agreements,
             conflicts = conflicts,
             acceptedCount = accepted.size,
-            rejectedCount = allJudged.count { !it.accepted }
+            rejectedCount = allJudged.count { !it.accepted },
+            consensusCount = consensusCount
         )
 
         if (accepted.isEmpty()) {
@@ -404,13 +423,13 @@ object SearchJudgePipeline {
         val avgTrust = accepted.map { it.reliabilityScore }.average()
         val confidence = when {
             contradicting.isNotEmpty() -> SearchConfidence.LOW
-            supporting.size >= 2 && avgRel >= 7.0 && avgTrust >= 6.5 -> SearchConfidence.HIGH
+            (supporting.size >= 2 || consensusCount >= 1) && avgRel >= 7.0 && avgTrust >= 6.5 -> SearchConfidence.HIGH
             supporting.isNotEmpty() && avgRel >= 5.5 -> SearchConfidence.MEDIUM
             else -> SearchConfidence.LOW
         }
 
         val evidenceBlock = accepted.joinToString("\n") { s ->
-            "[${s.index}] (${s.domain}, verdict=${s.verdict.wireValue}): ${wrapUntrustedWebContent(s.index, s.source.title, s.domain, s.publishedDate, s.keyClaim.ifBlank { s.source.snippet })}"
+            "[${s.index}] (${s.domain}, verdict=${s.verdict.wireValue}): ${wrapUntrustedWebContent(s.index, s.source.title, s.domain, s.publishedDate, s.keyClaim.ifBlank { s.source.snippet }, s.source.contributingEngines)}"
         }
 
         val synthSystem = """

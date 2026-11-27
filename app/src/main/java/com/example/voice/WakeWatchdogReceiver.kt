@@ -134,7 +134,7 @@ class WakeWatchdogReceiver : BroadcastReceiver() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val channel = NotificationChannel(
                     RECOVERY_CHANNEL_ID,
-                    "استئناف المساعد في الخلفية",
+                    "استئناف مساعد شيتا في الخلفية",
                     NotificationManager.IMPORTANCE_DEFAULT
                 )
                 nm.createNotificationChannel(channel)
@@ -151,8 +151,8 @@ class WakeWatchdogReceiver : BroadcastReceiver() {
             )
 
             val notification = NotificationCompat.Builder(context, RECOVERY_CHANNEL_ID)
-                .setSmallIcon(R.mipmap.ic_launcher_round)
-                .setContentTitle("شيتا جاهز للاستماع")
+                .setSmallIcon(R.drawable.ic_stat_sheeta)
+                .setContentTitle("مساعد شيتا جاهز للاستماع")
                 .setContentText("اضغط هنا لاستئناف الاستماع لكلمة التنبيه في الخلفية.")
                 .setAutoCancel(true)
                 .setContentIntent(openIntent)

@@ -77,12 +77,12 @@ fun ArchitectureScreen(
             item {
                 Column {
                     Text(
-                        text = "الهندسة والأداء الأوفلاين",
+                        text = "الهندسة والأداء الأوفلاين — شيتا",
                         style = MaterialTheme.typography.headlineMedium,
                         color = CheetahTextPrimary
                     )
                     Text(
-                        text = "Zero-External-API Blueprint & Android 7.0+ Hardware Telemetry",
+                        text = "Sheeta Custom Assistant • Zero-External-API Blueprint & Android 7.0+",
                         style = MaterialTheme.typography.labelSmall,
                         color = CheetahCyan
                     )

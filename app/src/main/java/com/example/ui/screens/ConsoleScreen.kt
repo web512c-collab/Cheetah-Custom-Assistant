@@ -174,7 +174,7 @@ fun ConsoleScreen(
                             color = CheetahTextPrimary
                         )
                         val modeSubtitle = buildString {
-                            append("ZERO-API-KEY • ar-EG")
+                            append("Sheeta Custom Assistant • ZERO-API-KEY • ar-EG")
                             if (localLlmStatus.loadState == LocalLlmLoadState.LOADED) append(" • GGUF")
                             if (settings.internetSearchEnabled) append(" • HTTPS Search")
                         }

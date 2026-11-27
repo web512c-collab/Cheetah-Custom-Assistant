@@ -18,7 +18,7 @@ import com.example.core.model.PermissionHealthState
 
 /**
  * Inspects real Android OS permission/role states across API 24–36 and builds
- * exact Settings Intents for Default Digital Assistant, Accessibility, Overlay, and Battery.
+ * exact Settings Intents for Default Digital Assistant, Accessibility, and Battery.
  */
 object PermissionHealthChecker {
 
@@ -40,7 +40,6 @@ object PermissionHealthChecker {
         val isDefaultAssistant = checkIsDefaultAssistant(context)
         val isAccessibility = checkAccessibilityEnabled(context) ||
             CheetahAccessibilityService.activeInstance != null
-        val canDrawOverlays = Settings.canDrawOverlays(context)
         val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
         val batteryIgnored = powerManager?.isIgnoringBatteryOptimizations(context.packageName) ?: false
 
@@ -49,7 +48,6 @@ object PermissionHealthChecker {
             hasNotificationPermission = hasNotif,
             isDefaultAssistant = isDefaultAssistant,
             isAccessibilityEnabled = isAccessibility,
-            canDrawOverlays = canDrawOverlays,
             isBatteryOptimizationIgnored = batteryIgnored
         )
     }
@@ -107,12 +105,6 @@ object PermissionHealthChecker {
 
     fun buildAccessibilitySettingsIntent(): Intent =
         Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-
-    fun buildOverlayPermissionIntent(context: Context): Intent =
-        Intent(
-            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-            Uri.parse("package:${context.packageName}")
-        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
     fun buildBatteryOptimizationIntent(context: Context): Intent =
         Intent(

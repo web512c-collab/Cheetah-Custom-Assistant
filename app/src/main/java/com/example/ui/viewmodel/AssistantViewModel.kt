@@ -8,11 +8,14 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.controller.DeviceActionExecutor
 import com.example.controller.PermissionHealthChecker
+import com.example.core.model.AiLanguagePreference
 import com.example.core.model.AiMode
+import com.example.core.model.AiPreset
 import com.example.core.model.AssistantGender
 import com.example.core.model.AssistantPipelineState
 import com.example.core.model.AssistantSettings
 import com.example.core.model.ChatTemplateFamily
+import com.example.core.model.ChatTemplateOverride
 import com.example.core.model.ConcreteSearchEngine
 import com.example.core.model.ConversationContextState
 import com.example.core.model.EndLineRule
@@ -26,6 +29,7 @@ import com.example.core.model.PerformanceProfile
 import com.example.core.model.PermissionHealthState
 import com.example.core.model.PersonaTone
 import com.example.core.model.ProposedAction
+import com.example.core.model.ResponseStyle
 import com.example.core.model.SearchEngineMode
 import com.example.core.model.SearchEngineTestResult
 import com.example.core.model.TransitionLogEntry
@@ -179,8 +183,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             settingsRepo.setPermissionFeatureState(
                 batteryEnabled = inspected.isBatteryOptimizationIgnored,
-                accessibilityEnabled = inspected.isAccessibilityEnabled,
-                overlayEnabled = inspected.canDrawOverlays
+                accessibilityEnabled = inspected.isAccessibilityEnabled
             )
         }
     }
@@ -684,6 +687,79 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun applyAiPreset(preset: AiPreset) {
+        viewModelScope.launch {
+            val cur = settingsRepo.currentSettings().localLlmConfig
+            val updated = SettingsRepository.applyPreset(cur, preset)
+            settingsRepo.updateLocalLlmConfig(updated)
+            localLlmManager.refreshStorageAndMemoryTelemetry(updated)
+        }
+    }
+
+    fun updateExpandedAiConfig(
+        topP: Float? = null,
+        topK: Int? = null,
+        minP: Float? = null,
+        repeatPenalty: Float? = null,
+        seed: Int? = null,
+        batchSize: Int? = null,
+        chatTemplateOverride: ChatTemplateOverride? = null,
+        customSystemPrompt: String? = null,
+        responseStyle: ResponseStyle? = null,
+        spokenMaxChars: Int? = null,
+        aiLanguagePreference: AiLanguagePreference? = null,
+        stopSequences: List<String>? = null,
+        stripReasoningTags: Boolean? = null
+    ) {
+        viewModelScope.launch {
+            val cur = settingsRepo.currentSettings().localLlmConfig
+            val samplingTouched = topP != null || topK != null || minP != null || repeatPenalty != null || batchSize != null
+            val updated = SettingsRepository.sanitizeLocalLlmConfig(
+                cur.copy(
+                    topP = topP ?: cur.topP,
+                    topK = topK ?: cur.topK,
+                    minP = minP ?: cur.minP,
+                    repeatPenalty = repeatPenalty ?: cur.repeatPenalty,
+                    seed = seed ?: cur.seed,
+                    batchSize = batchSize ?: cur.batchSize,
+                    chatTemplateOverride = chatTemplateOverride ?: cur.chatTemplateOverride,
+                    customSystemPrompt = customSystemPrompt ?: cur.customSystemPrompt,
+                    responseStyle = responseStyle ?: cur.responseStyle,
+                    spokenMaxChars = spokenMaxChars ?: cur.spokenMaxChars,
+                    aiLanguagePreference = aiLanguagePreference ?: cur.aiLanguagePreference,
+                    stopSequences = stopSequences ?: cur.stopSequences,
+                    stripReasoningTags = stripReasoningTags ?: cur.stripReasoningTags,
+                    activePreset = if (samplingTouched) AiPreset.CUSTOM else cur.activePreset
+                )
+            )
+            settingsRepo.updateLocalLlmConfig(updated)
+            localLlmManager.refreshStorageAndMemoryTelemetry(updated)
+        }
+    }
+
+    fun resetAiDefaults() {
+        viewModelScope.launch {
+            val cur = settingsRepo.currentSettings().localLlmConfig
+            val reset = SettingsRepository.resetAiDefaultsPreservingModel(cur)
+            settingsRepo.updateLocalLlmConfig(reset)
+            localLlmManager.refreshStorageAndMemoryTelemetry(reset)
+        }
+    }
+
+    suspend fun exportAiConfigJson(): String {
+        val cur = settingsRepo.currentSettings().localLlmConfig
+        return SettingsRepository.exportAiConfigToJson(cur)
+    }
+
+    suspend fun importAiConfigJson(rawJson: String): Result<Unit> {
+        val cur = settingsRepo.currentSettings().localLlmConfig
+        val res = SettingsRepository.importAiConfigFromJson(rawJson, cur)
+        return res.map { imported ->
+            settingsRepo.updateLocalLlmConfig(imported)
+            localLlmManager.refreshStorageAndMemoryTelemetry(imported)
+        }
+    }
+
     fun updateDomainLists(trustedDomains: List<String>, untrustedDomains: List<String>) {
         viewModelScope.launch {
             settingsRepo.updateDomainLists(trustedDomains, untrustedDomains)
@@ -739,6 +815,33 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             settingsRepo.setInternetSearch(
                 enabled = current.internetSearchEnabled,
                 autoSearchOrder = order
+            )
+        }
+    }
+
+    fun toggleSearchEngineEnabled(engine: ConcreteSearchEngine, enabled: Boolean) {
+        viewModelScope.launch {
+            val current = settingsRepo.currentSettings()
+            val updated = if (enabled) {
+                current.enabledSearchEngines + engine
+            } else {
+                val filtered = current.enabledSearchEngines - engine
+                if (filtered.isEmpty()) setOf(engine) else filtered
+            }
+            settingsRepo.setInternetSearch(
+                enabled = current.internetSearchEnabled,
+                enabledSearchEngines = updated
+            )
+            _searchTestResult.value = null
+        }
+    }
+
+    fun setFetchPageExcerpts(enabled: Boolean) {
+        viewModelScope.launch {
+            val current = settingsRepo.currentSettings()
+            settingsRepo.setInternetSearch(
+                enabled = current.internetSearchEnabled,
+                fetchPageExcerpts = enabled
             )
         }
     }

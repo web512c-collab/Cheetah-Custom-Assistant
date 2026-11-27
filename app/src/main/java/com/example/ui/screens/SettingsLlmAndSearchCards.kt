@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -450,8 +451,9 @@ fun LocalGgufLlmCard(
                         Text(
                             text = String.format(
                                 Locale.US,
-                                "الحجم: %.0f MB • %s • %s • %s",
+                                "الحجم: %.0f MB • ~%d MB RAM تقديرية • %s • %s • %s",
                                 sizeMb,
+                                llmStatus.estimatedRamMb.coerceAtLeast(1),
                                 cfg.architecture.ifBlank { "llama" },
                                 cfg.quantization.ifBlank { "GGUF" },
                                 cfg.storageMode.labelAr
@@ -616,6 +618,8 @@ fun KeylessInternetSearchCard(
     onSaveCustomSearxngUrl: (String) -> Unit,
     onSelectSearchEngine: (SearchEngineMode) -> Unit = {},
     onUpdateAutoSearchOrder: (List<ConcreteSearchEngine>) -> Unit = {},
+    onToggleSearchEngine: (ConcreteSearchEngine, Boolean) -> Unit = { _, _ -> },
+    onToggleFetchPageExcerpts: (Boolean) -> Unit = {},
     onTestSearxngConnection: (String) -> Unit = {},
     onTestSearch: () -> Unit = {}
 ) {
@@ -729,6 +733,9 @@ fun KeylessInternetSearchCard(
                                     }
                                 }
                             }
+                            if (pair.size == 1) {
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
                         }
                     }
                 }
@@ -747,21 +754,22 @@ fun KeylessInternetSearchCard(
                     )
                 }
 
-                // Editable fallback order when Auto is chosen
+                // Editable parallel priority & per-engine toggles when Auto is chosen
                 if (settings.searchEngineMode == SearchEngineMode.AUTO) {
                     Spacer(modifier = Modifier.height(10.dp))
                     Text(
-                        text = "ترتيب المحركات في الوضع التلقائي (الأولوية من الأعلى للأسفل):",
+                        text = "محركات البحث المتوازية (مفعّل / ترتيب الدمج):",
                         style = MaterialTheme.typography.labelMedium,
                         color = CheetahAmber
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         effectiveOrder.forEachIndexed { idx, engine ->
+                            val engineEnabled = engine in settings.enabledSearchEngines
                             Surface(
                                 color = CheetahDeepNavy,
                                 shape = RoundedCornerShape(10.dp),
-                                border = BorderStroke(1.dp, CheetahBorder)
+                                border = BorderStroke(1.dp, if (engineEnabled) CheetahBorder else CheetahBorder.copy(alpha = 0.4f))
                             ) {
                                 Row(
                                     modifier = Modifier
@@ -770,12 +778,27 @@ fun KeylessInternetSearchCard(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Text(
-                                        text = "${idx + 1}. ${engine.labelAr}",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = CheetahTextPrimary,
-                                        fontWeight = if (idx == 0) FontWeight.Bold else FontWeight.Normal
-                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Switch(
+                                            checked = engineEnabled,
+                                            onCheckedChange = { checked -> onToggleSearchEngine(engine, checked) },
+                                            colors = SwitchDefaults.colors(
+                                                checkedThumbColor = CheetahObsidian,
+                                                checkedTrackColor = CheetahEmerald
+                                            ),
+                                            modifier = Modifier.testTag("settings_engine_toggle_${engine.name.lowercase()}")
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "${idx + 1}. ${engine.labelAr}",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = if (engineEnabled) CheetahTextPrimary else CheetahTextSecondary,
+                                            fontWeight = if (idx == 0) FontWeight.Bold else FontWeight.Normal
+                                        )
+                                    }
                                     Row {
                                         TextButton(
                                             onClick = {
@@ -824,6 +847,35 @@ fun KeylessInternetSearchCard(
                             }
                         }
                     }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "جلب مقتطف قراءة من أعلى الصفحات",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = CheetahTextPrimary
+                        )
+                        Text(
+                            text = "يجلب حتى 120 KB عبر HTTPS لأول صفحتين لتحسين تقييم النتائج.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = CheetahTextSecondary
+                        )
+                    }
+                    Switch(
+                        checked = settings.fetchPageExcerpts,
+                        onCheckedChange = onToggleFetchPageExcerpts,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = CheetahObsidian,
+                            checkedTrackColor = CheetahCyan
+                        ),
+                        modifier = Modifier.testTag("settings_fetch_excerpts_switch")
+                    )
                 }
 
                 // Custom SearXNG URL + Save + Test connection
@@ -929,12 +981,27 @@ fun KeylessInternetSearchCard(
                         border = BorderStroke(1.dp, resultColor.copy(alpha = 0.5f)),
                         modifier = Modifier.testTag("settings_search_test_result")
                     ) {
-                        Text(
-                            text = searchTestResult.messageAr,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = resultColor,
-                            modifier = Modifier.padding(10.dp)
-                        )
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = searchTestResult.messageAr,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = resultColor
+                            )
+                            if (searchTestResult.perEngineReports.isNotEmpty()) {
+                                searchTestResult.perEngineReports.forEach { report ->
+                                    val statusColor = if (report.success) CheetahEmerald else CheetahAmber
+                                    val suffix = if (report.note.isNotBlank()) " — ${report.note}" else ""
+                                    Text(
+                                        text = "• ${report.engineName}: ${report.resultCount} نتيجة (${report.elapsedMs}ms)$suffix",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = statusColor
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }

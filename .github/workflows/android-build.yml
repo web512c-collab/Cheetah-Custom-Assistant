@@ -1,4 +1,4 @@
-name: Android CI - Build APK
+name: Sheeta Android CI - Build APK
 
 on:
   push:
@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Optional release tag (e.g. v0.4.1) to create or update a GitHub Release and attach the APK'
+        description: 'Optional release tag (e.g. v0.5.0) to create or update a GitHub Release and attach the APK'
         required: false
         type: string
 
@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   build:
-    name: Build & Test Cheetah APK
+    name: Build & Test Sheeta APK
     runs-on: ubuntu-latest
 
     steps:
@@ -92,11 +92,11 @@ jobs:
           echo "VERSION_TAG=$VERSION_TAG" >> "$GITHUB_ENV"
 
       - name: Run core JVM unit tests
-        run: ./gradlew :app:testDebugUnitTest --tests "com.example.CheetahCoreUnitTest" --tests "com.example.WakeWordBinaryModelTest" --tests "com.example.WakeStateMachineUnitTest" --tests "com.example.V030FeaturesUnitTest" --tests "com.example.V040AiBrainUnitTest" --tests "com.example.V041SearchEnginesUnitTest" --tests "com.example.ExampleUnitTest" --no-daemon
+        run: ./gradlew :app:testDebugUnitTest --tests "com.example.CheetahCoreUnitTest" --tests "com.example.WakeWordBinaryModelTest" --tests "com.example.WakeStateMachineUnitTest" --tests "com.example.V030FeaturesUnitTest" --tests "com.example.V040AiBrainUnitTest" --tests "com.example.V041SearchEnginesUnitTest" --tests "com.example.V050SheetaFeaturesUnitTest" --no-daemon
 
       - name: Run Robolectric smoke test (non-blocking)
         continue-on-error: true
-        run: ./gradlew :app:testDebugUnitTest --tests "com.example.ExampleRobolectricTest" --no-daemon
+        run: ./gradlew :app:testDebugUnitTest --tests "com.example.SheetaAppRobolectricSmokeTest" --no-daemon
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug --no-daemon
@@ -120,7 +120,7 @@ jobs:
           fi
 
           mkdir -p dist
-          APK_NAME="Cheetah-${{ steps.release_meta.outputs.tag }}-debug.apk"
+          APK_NAME="Sheeta-${{ steps.release_meta.outputs.tag }}-debug.apk"
           DEST_APK="dist/${APK_NAME}"
           cp -f "$SOURCE_APK" "$DEST_APK"
 
@@ -136,7 +136,7 @@ jobs:
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cheetah-debug-apk
+          name: sheeta-debug-apk
           path: ${{ steps.package_apk.outputs.apk_path }}
           if-no-files-found: error
 
@@ -167,7 +167,7 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 --decode > my-upload-key.jks
           ./gradlew assembleRelease --no-daemon
           if [ -f app/build/outputs/apk/release/app-release.apk ]; then
-            cp app/build/outputs/apk/release/app-release.apk "dist/Cheetah-${{ steps.release_meta.outputs.tag }}-release.apk"
+            cp app/build/outputs/apk/release/app-release.apk "dist/Sheeta-${{ steps.release_meta.outputs.tag }}-release.apk"
           fi
 
       - name: Clean up decoded release keystore
@@ -178,8 +178,8 @@ jobs:
         if: steps.release_secrets.outputs.enabled == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: cheetah-release-apk
-          path: dist/Cheetah-*-release.apk
+          name: sheeta-release-apk
+          path: dist/Sheeta-*-release.apk
           if-no-files-found: ignore
 
       - name: Extract release notes from CHANGELOG.md
@@ -192,7 +192,7 @@ jobs:
             in_section { print }
           ' CHANGELOG.md > dist/RELEASE_NOTES.md || true
           if [ ! -s dist/RELEASE_NOTES.md ]; then
-            echo "Cheetah Custom Assistant ${{ steps.release_meta.outputs.tag }} pre-release. See CHANGELOG.md for details." > dist/RELEASE_NOTES.md
+            echo "Sheeta Custom Assistant ${{ steps.release_meta.outputs.tag }} pre-release. See CHANGELOG.md for details." > dist/RELEASE_NOTES.md
           fi
           cat dist/RELEASE_NOTES.md
 
@@ -202,7 +202,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release_meta.outputs.tag }}
-          name: Cheetah Custom Assistant ${{ steps.release_meta.outputs.tag }}
+          name: Sheeta Custom Assistant ${{ steps.release_meta.outputs.tag }}
           body_path: dist/RELEASE_NOTES.md
           prerelease: true
           fail_on_unmatched_files: true

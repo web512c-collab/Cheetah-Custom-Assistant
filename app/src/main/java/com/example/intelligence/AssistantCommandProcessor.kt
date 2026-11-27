@@ -107,7 +107,11 @@ class AssistantCommandProcessor(
                 query = query,
                 internetSearchEnabled = settings.internetSearchEnabled,
                 customSearxngUrl = settings.customSearxngUrl,
-                maxResults = maxResults
+                maxResults = maxResults,
+                searchEngineMode = settings.searchEngineMode,
+                autoSearchOrder = settings.autoSearchOrder,
+                enabledEngines = settings.enabledSearchEngines,
+                fetchPageExcerpts = settings.fetchPageExcerpts
             )
         },
         healthProvider = { DeviceHealthMonitor.inspect(context) }

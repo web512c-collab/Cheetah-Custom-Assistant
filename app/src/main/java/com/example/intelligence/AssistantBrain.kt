@@ -101,7 +101,9 @@ class AssistantBrain(
             customSearxngUrl = s.customSearxngUrl,
             maxResults = cap,
             searchEngineMode = s.searchEngineMode,
-            autoSearchOrder = s.autoSearchOrder
+            autoSearchOrder = s.autoSearchOrder,
+            enabledEngines = s.enabledSearchEngines,
+            fetchPageExcerpts = s.fetchPageExcerpts
         )
     },
     private val healthProvider: () -> DeviceHealthSnapshot = { DeviceHealthSnapshot() },
@@ -154,7 +156,10 @@ class AssistantBrain(
 
         // 0b. Continuation request ("كمل" / "اقرا الباقي") when a truncated long answer is queued
         if (!pendingContinuationText.isNullOrBlank() && isContinuationCommand(normRaw, rawInput)) {
-            val speech = ReasoningOutputParser.buildConciseSpeechVersion(pendingContinuationText)
+            val speech = ReasoningOutputParser.buildConciseSpeechVersion(
+                fullAnswer = pendingContinuationText,
+                maxChars = settings.localLlmConfig.spokenMaxChars
+            )
             val full = pendingContinuationText.trim()
             return ProcessedCommandOutcome(
                 replyAr = full,
@@ -408,7 +413,10 @@ class AssistantBrain(
                 )
                 val elapsedMs = (System.currentTimeMillis() - evalStartMs).coerceAtLeast(10L)
                 val acceptedSources = verified.judgedSources.filter { it.accepted }.map { it.source }
-                val speech = ReasoningOutputParser.buildConciseSpeechVersion(verified.answerText)
+                val speech = ReasoningOutputParser.buildConciseSpeechVersion(
+                    fullAnswer = verified.answerText,
+                    maxChars = settings.localLlmConfig.spokenMaxChars
+                )
                 val needsShortcut = !modelLoaded && settings.localLlmConfig.judgeSearchWithAi
 
                 onRecordTurn(
@@ -531,7 +539,10 @@ class AssistantBrain(
                     }
                 }
 
-                val speech = ReasoningOutputParser.buildConciseSpeechVersion(gen.visibleAnswer)
+                val speech = ReasoningOutputParser.buildConciseSpeechVersion(
+                    fullAnswer = gen.visibleAnswer,
+                    maxChars = settings.localLlmConfig.spokenMaxChars
+                )
                 onRecordTurn(
                     BrainTurnRecord(
                         userText = rawInput,

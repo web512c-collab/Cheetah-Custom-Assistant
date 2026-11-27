@@ -79,7 +79,7 @@ class BootCompletedReceiver : BroadcastReceiver() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 RESUME_CHANNEL_ID,
-                "استئناف شيتا بعد إعادة التشغيل",
+                "استئناف مساعد شيتا بعد إعادة التشغيل",
                 NotificationManager.IMPORTANCE_DEFAULT
             )
             nm.createNotificationChannel(channel)
@@ -96,8 +96,8 @@ class BootCompletedReceiver : BroadcastReceiver() {
         )
 
         val notification = NotificationCompat.Builder(context, RESUME_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher_round)
-            .setContentTitle("شيتا جاهز للاستماع")
+            .setSmallIcon(R.drawable.ic_stat_sheeta)
+            .setContentTitle("مساعد شيتا جاهز للاستماع")
             .setContentText("اضغط لتفعيل خدمة كلمة التنبيه بعد إعادة تشغيل الهاتف (مطلوب في أندرويد 14+).")
             .setAutoCancel(true)
             .setContentIntent(openIntent)

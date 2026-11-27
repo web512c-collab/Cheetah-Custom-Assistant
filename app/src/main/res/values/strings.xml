@@ -1,12 +1,12 @@
 <resources>
-    <string name="app_name">Cheetah</string>
-    <string name="assistant_full_name">Cheetah Custom Assistant</string>
+    <string name="app_name">Sheeta Custom Assistant</string>
+    <string name="assistant_full_name">Sheeta Custom Assistant</string>
     <string name="assistant_subtitle_ar">مساعد شيتا الشخصي — أوفلاين بالكامل بالعامية المصرية</string>
-    <string name="accessibility_service_description">Allows Cheetah Assistant to perform screen actions you explicitly ask for (such as Go Back, Scroll, or Tap) after your opt-in.</string>
-    <string name="voice_interaction_service_label">Cheetah (شيتا)</string>
-    <string name="notification_channel_wake_word">Wake Word Monitoring</string>
-    <string name="notification_channel_wake_word_desc">Persistent notification showing that Cheetah is listening locally for your wake word without internet.</string>
-    <string name="notification_listening_title">Cheetah is ready and listening locally</string>
+    <string name="accessibility_service_description">Allows Sheeta Custom Assistant to perform screen actions you explicitly ask for (such as Go Back, Scroll, or Tap) after your opt-in.</string>
+    <string name="voice_interaction_service_label">Sheeta (شيتا)</string>
+    <string name="notification_channel_wake_word">Sheeta Wake Word Monitoring</string>
+    <string name="notification_channel_wake_word_desc">Persistent notification showing that Sheeta Custom Assistant is listening locally for your wake word without internet.</string>
+    <string name="notification_listening_title">Sheeta is ready and listening locally</string>
     <string name="notification_listening_body">Offline on-device listening for your wake phrase.</string>
     <string name="notification_action_mute">كتم مؤقت</string>
     <string name="notification_action_stop">إيقاف</string>

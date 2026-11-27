@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -424,7 +425,11 @@ fun EnrichedTraceLogCard(
                     trace.sources.forEachIndexed { idx, src ->
                         val judgedMeta = trace.judgedSources.firstOrNull { it.source.url == src.url }
                         val numLabel = judgedMeta?.index ?: (idx + 1)
-                        val engineLabel = src.engineName.ifBlank { src.provider }
+                        val engineLabel = if (src.contributingEngines.size >= 2) {
+                            src.contributingEngines.joinToString(" + ")
+                        } else {
+                            src.engineName.ifBlank { src.provider }
+                        }
                         val domainLabel = src.sourceDomain.ifBlank {
                             judgedMeta?.domain?.takeIf { it.isNotBlank() } ?: OnlineSearchManager.extractDomain(src.url)
                         }
@@ -432,6 +437,7 @@ fun EnrichedTraceLogCard(
                             ?.takeIf { it.isNotBlank() }
                             ?.let { " • $it" }
                             .orEmpty()
+                        val consensusBadge = if (src.contributingEngines.size >= 2) " ★تطابق" else ""
                         val metaBadge = if (judgedMeta != null && trace.generatedByLocalLlm) {
                             " [صلة ${judgedMeta.relevanceScore}/10 • ${judgedMeta.verdict.labelAr}]"
                         } else ""
@@ -440,6 +446,7 @@ fun EnrichedTraceLogCard(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .heightIn(min = 48.dp)
                                 .clickable {
                                     if (src.url.startsWith("https://", ignoreCase = true)) {
                                         runCatching {
@@ -457,11 +464,11 @@ fun EnrichedTraceLogCard(
                                 imageVector = Icons.AutoMirrored.Filled.OpenInNew,
                                 contentDescription = "فتح المصدر",
                                 tint = CheetahCyan,
-                                modifier = Modifier.size(14.dp)
+                                modifier = Modifier.size(16.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "[$numLabel] [$engineLabel] ${src.title} ($domainLabel$datePart)$metaBadge",
+                                text = "[$numLabel] [$engineLabel$consensusBadge] ${src.title} ($domainLabel$datePart)$metaBadge",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = CheetahCyan
                             )

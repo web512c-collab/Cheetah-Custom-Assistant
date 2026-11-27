@@ -4,16 +4,34 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Bold geometric Cheetah crest inside 66dp safe zone (21..87) -->
+    <!-- Original stylized Sheeta geometric emblem strictly within safe zone (24..84) -->
     <path
         android:fillColor="#FF22D3EE"
-        android:pathData="M30,28 L45,42 L54,36 L63,42 L78,28 L72,58 L54,80 L36,58 Z" />
-    <!-- Inner obsidian core visor -->
+        android:pathData="M28,27 L44,40 L54,34 L64,40 L80,27 L76,56 L66,73 L54,82 L42,73 L32,56 Z" />
+    <!-- Bright cyan top brow facet -->
+    <path
+        android:fillColor="#FF67E8F9"
+        android:pathData="M31,30 L44,41 L54,36 L64,41 L77,30 L74,42 L54,48 L34,42 Z" />
+    <!-- Obsidian inner visor mask -->
     <path
         android:fillColor="#FF0A1220"
-        android:pathData="M41,49 L54,55 L67,49 L62,62 L54,70 L46,62 Z" />
-    <!-- Amber arc-core spark -->
+        android:pathData="M37,46 L54,52 L71,46 L68,61 L54,75 L40,61 Z" />
+    <!-- Dual amber visor eyes -->
     <path
         android:fillColor="#FFF59E0B"
-        android:pathData="M48,56 L54,60 L60,56 L54,66 Z" />
+        android:pathData="M40,51 L51,55 L48,59 L41,56 Z" />
+    <path
+        android:fillColor="#FFF59E0B"
+        android:pathData="M68,51 L57,55 L60,59 L67,56 Z" />
+    <!-- Central amber acoustic core & bridge -->
+    <path
+        android:fillColor="#FFF59E0B"
+        android:pathData="M50,62 L54,60 L58,62 L54,70 Z" />
+    <!-- Side cyan tear-stripe telemetry marks -->
+    <path
+        android:fillColor="#FF22D3EE"
+        android:pathData="M43,62 L49,68 L47,71 L41,65 Z" />
+    <path
+        android:fillColor="#FF22D3EE"
+        android:pathData="M65,62 L59,68 L61,71 L67,65 Z" />
 </vector>

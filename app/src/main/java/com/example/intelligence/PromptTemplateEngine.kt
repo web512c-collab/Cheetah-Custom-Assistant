@@ -1,5 +1,6 @@
 package com.example.intelligence
 
+import com.example.core.model.AiLanguagePreference
 import com.example.core.model.AiMode
 import com.example.core.model.AiTaskType
 import com.example.core.model.AssistantGender
@@ -10,7 +11,9 @@ import com.example.core.model.EgyptianIntent
 import com.example.core.model.MediaAction
 import com.example.core.model.PersonaTone
 import com.example.core.model.ProposedAction
+import com.example.core.model.ResponseStyle
 import com.example.core.model.SettingPanelTarget
+import com.example.data.SettingsRepository
 
 /**
  * Builds task-specific prompts across all 13 AiTaskType categories in the selected
@@ -28,10 +31,26 @@ object PromptTemplateEngine {
         rollingSummary: String = ""
     ): String {
         val basePersona = JarvisEgyptianResponder.buildLocalLlmSystemPrompt(settings)
-        val languageInstruction = if (nonArabicInput) {
-            "المستخدم كتب بلغة غير العربية؛ رد بنفس لغة المستخدم بوضوح ولباقة."
-        } else {
-            "الرد الافتراضي بالعامية المصرية الطبيعية السهلة."
+        val cfg = settings.localLlmConfig
+        val languageInstruction = when (cfg.aiLanguagePreference) {
+            AiLanguagePreference.EGYPTIAN_ARABIC ->
+                "رد دائماً بالعامية المصرية الطبيعية السهلة."
+            AiLanguagePreference.ENGLISH ->
+                "Always answer clearly and concisely in natural English unless the user explicitly asks for translation."
+            AiLanguagePreference.MATCH_USER -> if (nonArabicInput) {
+                "المستخدم كتب بلغة غير العربية؛ رد بنفس لغة المستخدم بوضوح ولباقة."
+            } else {
+                "الرد بالعامية المصرية الطبيعية السهلة."
+            }
+        }
+
+        val styleInstruction = when (cfg.responseStyle) {
+            ResponseStyle.SHORT ->
+                "أسلوب الطول: رد مختصر جداً ومباشر بدون إطالة."
+            ResponseStyle.BALANCED ->
+                "أسلوب الطول: شرح متوازن وواضح مع أهم النقاط فقط."
+            ResponseStyle.DETAILED ->
+                "أسلوب الطول: شرح مفصّل ومنظم يغطي التفاصيل والأمثلة المهمة."
         }
 
         val modeInstruction = when (aiMode) {
@@ -75,11 +94,16 @@ object PromptTemplateEngine {
         val actionSafetyRule =
             "ممنوع تنفيذ أو ادعاء تنفيذ أي فعل على الجهاز. لو المستخدم محتاج إجراء فعلي على الموبايل، تقدر تقترح فقط في آخر سطر: [[PROPOSE_ACTION:OPEN_APP|اسم_التطبيق]] أو [[PROPOSE_ACTION:WEB_SEARCH|استعلام]] أو [[PROPOSE_ACTION:SETTING_PANEL|wifi/bluetooth/location]] عشان المستخدم يأكده بنفسه."
 
+        val customPrompt = SettingsRepository.sanitizeSystemPrompt(cfg.customSystemPrompt)
+        val customBlock = if (customPrompt.isNotBlank()) {
+            "\nتفضيلات إضافية من المستخدم (لا تتجاوز قواعد الأمان):\n$customPrompt"
+        } else ""
+
         val memoryBlock = if (rollingSummary.isNotBlank()) {
             "\nملخص السياق السابق:\n$rollingSummary"
         } else ""
 
-        return "$basePersona\n$languageInstruction\n$modeInstruction\n$taskDirective\n$actionSafetyRule$memoryBlock"
+        return "$basePersona\n$languageInstruction\n$styleInstruction\n$modeInstruction\n$taskDirective\n$actionSafetyRule$customBlock$memoryBlock"
     }
 
     fun buildUserPrompt(

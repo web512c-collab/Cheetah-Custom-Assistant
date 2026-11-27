@@ -29,7 +29,6 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Hearing
-import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Notifications
@@ -72,9 +71,12 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.core.model.AiLanguagePreference
 import com.example.core.model.AiMode
+import com.example.core.model.AiPreset
 import com.example.core.model.AssistantGender
 import com.example.core.model.AssistantSettings
+import com.example.core.model.ChatTemplateOverride
 import com.example.core.model.ConcreteSearchEngine
 import com.example.core.model.ConversationContextState
 import com.example.core.model.EndLineRule
@@ -82,6 +84,7 @@ import com.example.core.model.LocalLlmRuntimeStatus
 import com.example.core.model.PerformanceProfile
 import com.example.core.model.PermissionHealthState
 import com.example.core.model.PersonaTone
+import com.example.core.model.ResponseStyle
 import com.example.core.model.SearchEngineMode
 import com.example.core.model.SearchEngineTestResult
 import com.example.core.model.TransitionLogEntry
@@ -145,7 +148,6 @@ fun SettingsScreen(
     onToggleNotificationSwitch: (Boolean) -> Unit,
     onToggleBatterySwitch: (Boolean) -> Unit,
     onToggleAccessibilitySwitch: (Boolean) -> Unit,
-    onToggleOverlaySwitch: (Boolean) -> Unit,
     onOpenAppSettings: () -> Unit,
     onRefreshPermissions: () -> Unit,
     onPickGgufModel: () -> Unit,
@@ -155,11 +157,18 @@ fun SettingsScreen(
     onCancelLlmGeneration: () -> Unit,
     onUpdateLlmConfig: (Int?, Int?, Float?, Int?) -> Unit,
     onUpdateAiBrainConfig: (Boolean?, AiMode?, Boolean?, Int?, Boolean?, Boolean?, Int?, PerformanceProfile?, Int?) -> Unit = { _, _, _, _, _, _, _, _, _ -> },
+    onApplyAiPreset: (AiPreset) -> Unit = {},
+    onUpdateExpandedAiConfig: (Float?, Int?, Float?, Float?, Int?, Int?, ChatTemplateOverride?, String?, ResponseStyle?, Int?, AiLanguagePreference?, List<String>?, Boolean?) -> Unit = { _, _, _, _, _, _, _, _, _, _, _, _, _ -> },
+    onResetAiDefaults: () -> Unit = {},
+    onExportAiConfig: () -> Unit = {},
+    onImportAiConfig: () -> Unit = {},
     onUpdateDomainLists: (List<String>, List<String>) -> Unit = { _, _ -> },
     onRunBenchmark: () -> Unit = {},
     onSetInternetSearch: (Boolean, String?) -> Unit,
     onSelectSearchEngine: (SearchEngineMode) -> Unit = {},
     onUpdateAutoSearchOrder: (List<ConcreteSearchEngine>) -> Unit = {},
+    onToggleSearchEngine: (ConcreteSearchEngine, Boolean) -> Unit = { _, _ -> },
+    onToggleFetchPageExcerpts: (Boolean) -> Unit = {},
     onTestSearxngConnection: (String) -> Unit = {},
     onTestSearchEngine: () -> Unit = {},
     onRunMicDiagnosticTest: () -> Unit,
@@ -195,12 +204,12 @@ fun SettingsScreen(
             item {
                 Column {
                     Text(
-                        text = "مركز الإعدادات والتحكم",
+                        text = "إعدادات مساعد شيتا والتحكم",
                         style = MaterialTheme.typography.headlineMedium,
                         color = CheetahTextPrimary
                     )
                     Text(
-                        text = "تحكم كامل في المساعد الافتراضي، اسم التنبيه، البصمة الصوتية، التشخيص، والذاكرة المحلية",
+                        text = "Sheeta Custom Assistant • تحكم كامل في المساعد الافتراضي، كلمة التنبيه، الذكاء المحلي، والبحث المتعدد",
                         style = MaterialTheme.typography.bodySmall,
                         color = CheetahTextSecondary
                     )
@@ -873,7 +882,20 @@ fun SettingsScreen(
                 )
             }
 
-            // 6. OPTIONAL KEYLESS INTERNET SEARCH & ENGINE SELECTOR (PART D + v0.4.1)
+            // 5C. EXPANDED LOCAL AI CONTROLS & JSON CONFIG EXPORT/IMPORT (v0.5.0)
+            item {
+                SettingsAiControlsCard(
+                    settings = settings,
+                    llmStatus = localLlmStatus,
+                    onApplyPreset = onApplyAiPreset,
+                    onUpdateExpandedConfig = onUpdateExpandedAiConfig,
+                    onResetAiDefaults = onResetAiDefaults,
+                    onExportAiConfig = onExportAiConfig,
+                    onImportAiConfig = onImportAiConfig
+                )
+            }
+
+            // 6. OPTIONAL KEYLESS INTERNET SEARCH & PARALLEL ENGINE SELECTOR (PART D + v0.5.0)
             item {
                 KeylessInternetSearchCard(
                     settings = settings,
@@ -883,6 +905,8 @@ fun SettingsScreen(
                     onSaveCustomSearxngUrl = { url -> onSetInternetSearch(settings.internetSearchEnabled, url) },
                     onSelectSearchEngine = onSelectSearchEngine,
                     onUpdateAutoSearchOrder = onUpdateAutoSearchOrder,
+                    onToggleSearchEngine = onToggleSearchEngine,
+                    onToggleFetchPageExcerpts = onToggleFetchPageExcerpts,
                     onTestSearxngConnection = onTestSearxngConnection,
                     onTestSearch = onTestSearchEngine
                 )
@@ -970,15 +994,6 @@ fun SettingsScreen(
                         osGranted = permissions.isAccessibilityEnabled,
                         testTag = "perm_accessibility_switch",
                         onCheckedChange = onToggleAccessibilitySwitch
-                    )
-                    PermissionSwitchRow(
-                        icon = Icons.Default.Layers,
-                        titleAr = "الظهور فوق التطبيقات الأخرى",
-                        subtitleAr = "اختيارية لعرض شاشة المساعد فوق أي تطبيق مفتوح.",
-                        checked = permissions.canDrawOverlays,
-                        osGranted = permissions.canDrawOverlays,
-                        testTag = "perm_overlay_switch",
-                        onCheckedChange = onToggleOverlaySwitch
                     )
 
                     Spacer(modifier = Modifier.height(6.dp))

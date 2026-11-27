@@ -27,6 +27,7 @@ struct EngineState {
     llama_context * ctx = nullptr;
     int32_t context_len = 1024;
     int32_t threads = 4;
+    int32_t batch_size = 256;
     bool backend_initialized = false;
     std::atomic<bool> cancel_requested{false};
     std::vector<llama_token> cached_tokens;
@@ -131,6 +132,12 @@ std::string run_generation_locked(
         const std::string & formatted,
         int32_t max_tokens,
         float temperature,
+        float top_p,
+        int32_t top_k,
+        float min_p,
+        float repeat_penalty,
+        int32_t seed,
+        const std::vector<std::string> & stop_sequences,
         const std::string & gbnf_grammar,
         bool reuse_kv_cache,
         jobject tokenCallback) {
@@ -233,10 +240,24 @@ std::string run_generation_locked(
     if (temperature <= 0.05f) {
         llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
     } else {
-        llama_sampler_chain_add(smpl, llama_sampler_init_top_k(40));
-        llama_sampler_chain_add(smpl, llama_sampler_init_top_p(0.90f, 1));
+        const int32_t eff_top_k = std::clamp<int32_t>(top_k, 1, 200);
+        const float eff_top_p = std::clamp(top_p, 0.10f, 1.0f);
+        const float eff_min_p = std::clamp(min_p, 0.0f, 0.50f);
+        const float eff_repeat = std::clamp(repeat_penalty, 0.90f, 1.60f);
+        const uint32_t eff_seed = (seed < 0) ? LLAMA_DEFAULT_SEED : static_cast<uint32_t>(seed);
+
+        llama_sampler_chain_add(smpl, llama_sampler_init_top_k(eff_top_k));
+        llama_sampler_chain_add(smpl, llama_sampler_init_top_p(eff_top_p, 1));
+        if (eff_min_p > 0.001f) {
+            llama_sampler_chain_add(smpl, llama_sampler_init_min_p(eff_min_p, 1));
+        }
+        if (eff_repeat > 1.001f || eff_repeat < 0.999f) {
+            llama_sampler_chain_add(
+                    smpl,
+                    llama_sampler_init_penalties(llama_vocab_n_tokens(vocab), 64, eff_repeat, 0.0f, 0.0f));
+        }
         llama_sampler_chain_add(smpl, llama_sampler_init_temp(temperature));
-        llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+        llama_sampler_chain_add(smpl, llama_sampler_init_dist(eff_seed));
     }
 
     llama_batch_ext * batch = llama_batch_ext_init(g_engine.ctx);
@@ -247,7 +268,7 @@ std::string run_generation_locked(
     }
 
     const int32_t total_prompt = static_cast<int32_t>(prompt_tokens.size());
-    const int32_t chunk_cap = 256;
+    const int32_t chunk_cap = std::max<int32_t>(32, g_engine.batch_size);
     int32_t n_pos = common_prefix;
     bool eval_ok = true;
     while (n_pos < total_prompt && !g_engine.cancel_requested.load()) {
@@ -300,6 +321,20 @@ std::string run_generation_locked(
                     }
                 }
             }
+        }
+
+        bool hit_stop = false;
+        for (const auto & stop_seq : stop_sequences) {
+            if (!stop_seq.empty() && full_output.size() >= stop_seq.size()) {
+                if (full_output.compare(full_output.size() - stop_seq.size(), stop_seq.size(), stop_seq) == 0) {
+                    full_output.erase(full_output.size() - stop_seq.size());
+                    hit_stop = true;
+                    break;
+                }
+            }
+        }
+        if (hit_stop) {
+            break;
         }
 
         if (!batch_set_tokens(batch, &new_tok, 1, n_pos)) {
@@ -356,7 +391,8 @@ Java_com_example_llm_LlamaNativeBridge_nativeLoadModelFromPath(
         jobject /* thiz */,
         jstring path,
         jint contextLen,
-        jint threads) {
+        jint threads,
+        jint batchSize) {
     if (path == nullptr) return JNI_FALSE;
     const char * cpath = env->GetStringUTFChars(path, nullptr);
     if (cpath == nullptr) return JNI_FALSE;
@@ -380,10 +416,11 @@ Java_com_example_llm_LlamaNativeBridge_nativeLoadModelFromPath(
 
         const int32_t n_ctx = contextLen > 128 ? contextLen : 1024;
         const int32_t n_threads = threads > 0 ? threads : 4;
+        const int32_t n_batch = std::clamp<int32_t>(batchSize > 0 ? batchSize : 256, 32, std::min<int32_t>(n_ctx, 1024));
 
         llama_context_params cparams = llama_context_default_params();
         cparams.n_ctx = static_cast<uint32_t>(n_ctx);
-        cparams.n_batch = static_cast<uint32_t>(n_ctx < 512 ? n_ctx : 512);
+        cparams.n_batch = static_cast<uint32_t>(n_batch);
         cparams.n_threads = n_threads;
         cparams.n_threads_batch = n_threads;
         cparams.no_perf = true;
@@ -399,8 +436,9 @@ Java_com_example_llm_LlamaNativeBridge_nativeLoadModelFromPath(
         g_engine.ctx = ctx;
         g_engine.context_len = n_ctx;
         g_engine.threads = n_threads;
+        g_engine.batch_size = n_batch;
         g_engine.cached_tokens.clear();
-        LOGI("Loaded GGUF model successfully (ctx=%d, threads=%d)", n_ctx, n_threads);
+        LOGI("Loaded GGUF model successfully (ctx=%d, threads=%d, batch=%d)", n_ctx, n_threads, n_batch);
         return JNI_TRUE;
     } catch (const std::bad_alloc &) {
         LOGE("OOM loading GGUF model from path");
@@ -419,7 +457,8 @@ Java_com_example_llm_LlamaNativeBridge_nativeLoadModelFromFd(
         jobject /* thiz */,
         jint fd,
         jint contextLen,
-        jint threads) {
+        jint threads,
+        jint batchSize) {
     if (fd < 0) return JNI_FALSE;
 
     std::lock_guard<std::mutex> lock(g_engine.mutex);
@@ -457,10 +496,11 @@ Java_com_example_llm_LlamaNativeBridge_nativeLoadModelFromFd(
 
         const int32_t n_ctx = contextLen > 128 ? contextLen : 1024;
         const int32_t n_threads = threads > 0 ? threads : 4;
+        const int32_t n_batch = std::clamp<int32_t>(batchSize > 0 ? batchSize : 256, 32, std::min<int32_t>(n_ctx, 1024));
 
         llama_context_params cparams = llama_context_default_params();
         cparams.n_ctx = static_cast<uint32_t>(n_ctx);
-        cparams.n_batch = static_cast<uint32_t>(n_ctx < 512 ? n_ctx : 512);
+        cparams.n_batch = static_cast<uint32_t>(n_batch);
         cparams.n_threads = n_threads;
         cparams.n_threads_batch = n_threads;
         cparams.no_perf = true;
@@ -476,8 +516,9 @@ Java_com_example_llm_LlamaNativeBridge_nativeLoadModelFromFd(
         g_engine.ctx = ctx;
         g_engine.context_len = n_ctx;
         g_engine.threads = n_threads;
+        g_engine.batch_size = n_batch;
         g_engine.cached_tokens.clear();
-        LOGI("Loaded GGUF model via SAF FD (ctx=%d, threads=%d)", n_ctx, n_threads);
+        LOGI("Loaded GGUF model via SAF FD (ctx=%d, threads=%d, batch=%d)", n_ctx, n_threads, n_batch);
         return JNI_TRUE;
     } catch (const std::bad_alloc &) {
         LOGE("OOM loading GGUF model from FD");
@@ -596,8 +637,9 @@ Java_com_example_llm_LlamaNativeBridge_nativeGenerateStream(
     }
     try {
         std::string formatted = build_prompt(g_engine.model, sys_str.c_str(), usr_str.c_str());
+        std::vector<std::string> no_stops;
         std::string out = run_generation_locked(
-                env, formatted, maxTokens, temperature, "", false, tokenCallback);
+                env, formatted, maxTokens, temperature, 0.90f, 40, 0.05f, 1.10f, -1, no_stops, "", false, tokenCallback);
         return env->NewStringUTF(out.c_str());
     } catch (const std::bad_alloc &) {
         LOGE("OOM during nativeGenerateStream");
@@ -617,6 +659,12 @@ Java_com_example_llm_LlamaNativeBridge_nativeGenerateRawStream(
         jstring formattedPrompt,
         jint maxTokens,
         jfloat temperature,
+        jfloat topP,
+        jint topK,
+        jfloat minP,
+        jfloat repeatPenalty,
+        jint seed,
+        jobjectArray stopSequences,
         jstring gbnfGrammar,
         jboolean reuseKvCache,
         jobject tokenCallback) {
@@ -636,6 +684,22 @@ Java_com_example_llm_LlamaNativeBridge_nativeGenerateRawStream(
         }
     }
 
+    std::vector<std::string> stop_vec;
+    if (stopSequences != nullptr) {
+        const jsize len = env->GetArrayLength(stopSequences);
+        for (jsize i = 0; i < len; ++i) {
+            jstring item = static_cast<jstring>(env->GetObjectArrayElement(stopSequences, i));
+            if (item != nullptr) {
+                const char * s_c = env->GetStringUTFChars(item, nullptr);
+                if (s_c != nullptr && s_c[0] != '\0') {
+                    stop_vec.emplace_back(s_c);
+                }
+                if (s_c != nullptr) env->ReleaseStringUTFChars(item, s_c);
+                env->DeleteLocalRef(item);
+            }
+        }
+    }
+
     std::lock_guard<std::mutex> lock(g_engine.mutex);
     if (g_engine.model == nullptr || g_engine.ctx == nullptr) {
         return env->NewStringUTF("");
@@ -646,6 +710,12 @@ Java_com_example_llm_LlamaNativeBridge_nativeGenerateRawStream(
                 prompt_str,
                 maxTokens,
                 temperature,
+                topP,
+                topK,
+                minP,
+                repeatPenalty,
+                seed,
+                stop_vec,
                 grammar_str,
                 reuseKvCache == JNI_TRUE,
                 tokenCallback);

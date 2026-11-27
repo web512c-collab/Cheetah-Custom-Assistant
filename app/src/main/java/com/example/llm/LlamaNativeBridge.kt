@@ -21,8 +21,8 @@ object LlamaNativeBridge {
         }
     }
 
-    external fun nativeLoadModelFromPath(path: String, contextLen: Int, threads: Int): Boolean
-    external fun nativeLoadModelFromFd(fd: Int, contextLen: Int, threads: Int): Boolean
+    external fun nativeLoadModelFromPath(path: String, contextLen: Int, threads: Int, batchSize: Int): Boolean
+    external fun nativeLoadModelFromFd(fd: Int, contextLen: Int, threads: Int, batchSize: Int): Boolean
     external fun nativeGetModelDescription(): String
     external fun nativeGetChatTemplate(): String
     external fun nativeCountTokens(text: String): Int
@@ -41,6 +41,12 @@ object LlamaNativeBridge {
         formattedPrompt: String,
         maxTokens: Int,
         temperature: Float,
+        topP: Float,
+        topK: Int,
+        minP: Float,
+        repeatPenalty: Float,
+        seed: Int,
+        stopSequences: Array<String>?,
         gbnfGrammar: String?,
         reuseKvCache: Boolean,
         tokenCallback: LlamaTokenCallback?

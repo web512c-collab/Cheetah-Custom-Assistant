@@ -17,14 +17,22 @@
                     android:color="#FF070B14"
                     android:offset="0.0" />
                 <item
-                    android:color="#FF13243B"
+                    android:color="#FF0D1B2E"
+                    android:offset="0.55" />
+                <item
+                    android:color="#FF152942"
                     android:offset="1.0" />
             </gradient>
         </aapt:attr>
     </path>
     <path
         android:fillColor="#00000000"
-        android:pathData="M54,14 A40,40 0 1,1 53.99,14 Z"
+        android:pathData="M54,12 A42,42 0 1,1 53.99,12 Z"
         android:strokeWidth="1.2"
-        android:strokeColor="#2222D3EE" />
+        android:strokeColor="#2822D3EE" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,20 A34,34 0 1,1 53.99,20 Z"
+        android:strokeWidth="0.9"
+        android:strokeColor="#1CF59E0B" />
 </vector>

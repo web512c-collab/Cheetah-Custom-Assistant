@@ -895,7 +895,7 @@ class WakeWordDetectionService : Service() {
         }
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher_round)
+            .setSmallIcon(R.drawable.ic_stat_sheeta)
             .setContentTitle(title)
             .setContentText(body)
             .setOngoing(true)

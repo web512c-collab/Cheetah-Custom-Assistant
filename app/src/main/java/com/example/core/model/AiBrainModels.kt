@@ -84,6 +84,45 @@ enum class ChatTemplateFamily(
     GENERIC_UNKNOWN("قالب عام غير معروف", false)
 }
 
+enum class ChatTemplateOverride(val labelAr: String, val labelEn: String) {
+    AUTO("تلقائي (من GGUF)", "Auto (GGUF)"),
+    CHATML("ChatML", "ChatML"),
+    LLAMA3("Llama 3", "Llama 3"),
+    GEMMA("Gemma", "Gemma"),
+    MISTRAL("Mistral", "Mistral"),
+    QWEN("Qwen", "Qwen"),
+    PHI("Phi", "Phi");
+
+    fun toFamilyOrNull(): ChatTemplateFamily? = when (this) {
+        AUTO -> null
+        CHATML -> ChatTemplateFamily.CHATML
+        LLAMA3 -> ChatTemplateFamily.LLAMA3
+        GEMMA -> ChatTemplateFamily.GEMMA
+        MISTRAL -> ChatTemplateFamily.MISTRAL
+        QWEN -> ChatTemplateFamily.QWEN
+        PHI -> ChatTemplateFamily.PHI
+    }
+}
+
+enum class ResponseStyle(val labelAr: String, val labelEn: String) {
+    SHORT("مختصر", "Short"),
+    BALANCED("متوازن", "Balanced"),
+    DETAILED("مفصّل", "Detailed")
+}
+
+enum class AiLanguagePreference(val labelAr: String, val labelEn: String) {
+    EGYPTIAN_ARABIC("العامية المصرية", "Egyptian Arabic"),
+    ENGLISH("الإنجليزية", "English"),
+    MATCH_USER("نفس لغة سؤالك", "Match User")
+}
+
+enum class AiPreset(val labelAr: String, val labelEn: String) {
+    FAST("سريع", "Fast"),
+    BALANCED("متوازن", "Balanced"),
+    DEEP("تفكير عميق", "Deep"),
+    CUSTOM("مخصّص", "Custom")
+}
+
 data class ReasoningSplitResult(
     val finalAnswer: String,
     val reasoningText: String = "",
@@ -121,7 +160,8 @@ data class CrossCheckReport(
     val agreements: List<String> = emptyList(),
     val conflicts: List<String> = emptyList(),
     val acceptedCount: Int = 0,
-    val rejectedCount: Int = 0
+    val rejectedCount: Int = 0,
+    val consensusCount: Int = 0
 )
 
 data class VerifiedSearchAnswer(

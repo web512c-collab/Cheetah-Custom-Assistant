@@ -1,6 +1,33 @@
 # Changelog
 
-All notable changes to **Cheetah Custom Assistant** are documented in this file.
+All notable changes to **Sheeta Custom Assistant** (formerly Cheetah Custom Assistant) are documented in this file.
+
+## v0.5.0 (2026-11-27)
+
+**Version:** `0.5.0` (`versionCode = 6`, up from `versionCode = 5` in `v0.4.1`)  
+**Signing:** Preserves the exact same `applicationId` (`com.aistudio.cheetahassistant.egxkar`), Kotlin package namespace (`com.example.*`), and `debug.keystore` (`androiddebugkey`) signing configuration so `Sheeta-v0.5.0-debug.apk` installs as an in-place update over `v0.4.1` and earlier builds.
+
+### Rebrand & Identity ("Sheeta Custom Assistant")
+- Renamed visible product branding across English & Arabic strings (`Sheeta Custom Assistant` / `مساعد شيتا الشخصي`), notification titles and channels (`BootCompletedReceiver`, `WakeWatchdogReceiver`, `WakeWordDetectionService`), VoiceInteractionService & Accessibility labels, assistant session overlay (`assistant_session_overlay.xml`), Console/Settings/Architecture headers, HTTP `User-Agent`, `settings.gradle.kts`, `metadata.json`, docs, and `.github/workflows/android-build.yml` (`Sheeta-<tag>-debug.apk`).
+
+### About Tab (`AppLinks`, `AboutScreen`, `MainActivity`)
+- Added dedicated **About** navigation tab (`"عن التطبيق"`, `ROUTE_ABOUT`) in bottom `NavigationBar` and adaptive `NavigationRail`.
+- Displays app identity, live `BuildConfig.VERSION_NAME` & `BuildConfig.VERSION_CODE`, bilingual overview, developer credit (**Mohammad Joseph**), clickable `>= 48.dp` GitHub profile and repository links (`sheeta-custom-assistant`, `sheeta-operations-research`), honest network privacy statement, and Open-Source Software notices (`llama.cpp` MIT, Jetpack Compose / AndroidX / Kotlin / Material Icons Apache 2.0).
+
+### Adaptive & Monochrome Launcher + Notification Icons
+- Created custom vector adaptive launcher foreground (`ic_launcher_foreground.xml`), background (`ic_launcher_background.xml`), dedicated Android 13+ themed monochrome icon (`ic_launcher_monochrome.xml`), legacy mipmap PNGs (`48`–`192` px), and a dedicated 24dp monochrome white notification icon (`ic_stat_sheeta.xml`).
+
+### Expanded Local AI Controls (`LocalLlmConfig`, `cheetah_llama_jni.cpp`, `LocalLlmManager`, `SettingsRepository`, `SettingsAiControlsCard`)
+- **Presets & Sampling:** Added `FAST`, `BALANCED`, `DEEP`, and `CUSTOM` presets, plus live controls for `topP`, `topK`, `minP`, `repeatPenalty`, `seed` (random `-1` or fixed integer), and `batchSize` (`n_batch` / decode chunk capacity wired in JNI). Context length, thread count, and batch-size edits trigger clean model reload on next inference.
+- **Prompt, Language & Template Controls:** Added sanitized editable `customSystemPrompt` (capped at 1,200 chars + `"Restore default"`), manual `chatTemplateOverride` (`AUTO`, `ChatML`, `Llama 3`, `Gemma`, `Mistral`, `Qwen`, `Phi`) with mismatch warning, `responseStyle` (`SHORT`, `BALANCED`, `DETAILED`), `aiLanguagePreference` (`EGYPTIAN_ARABIC`, `ENGLISH`, `MATCH_USER`), `spokenMaxChars` slider (`80..600`), editable `stopSequences`, `stripReasoningTags` toggle, `"Reset AI defaults"` (preserving model selection), estimated RAM telemetry (`estimatedRamMb`), and SAF JSON config export/import (`sheeta-ai-config.json`).
+
+### Multi-Engine Parallel Search & Page Excerpt Comparison (`OnlineSearchManager`, `SearchJudgePipeline`, `ConsoleAiOverlays`)
+- Strictly gated OFF by default; transmits only cleaned search query text (and up to 2 top HTTPS pages when enabled) — never mic audio, memory, or PII.
+- Added **Mojeek** public HTML parser (`parseMojeekHtml`) alongside **DuckDuckGo**, **Wikipedia** (`ar`/`en`), and HTTPS-validated **SearXNG** (never Google or Bing).
+- Added parallel `AUTO` execution (`coroutineScope` + `async` + per-engine timeout), per-engine enable/disable switches, editable engine order, Reciprocal Rank Fusion (`1 / (60 + rank)`) with multi-engine consensus boost, tracking-param URL deduplication (`contributingEngines`), HTTPS-only `<= 120 KB` page-excerpt enrichment (`fetchPageExcerpts`), strict `<<<UNTRUSTED_WEB_CONTENT>>>` delimiting, per-engine hit/latency reports in `"Test search"`, and multi-engine badges in Console sources.
+
+### Cleanup, Security & Testing
+- Removed `SYSTEM_ALERT_WINDOW` overlay permission and dead code (`CheetahWakeWordService`, unused `res/colors.xml`, unused `/public` assets, unused Gradle plugins/commented deps, placeholder `Example*Test` classes), set `android:allowBackup="false"`, enforced `>= 48.dp` touch height on Console source links, and added `V050SheetaFeaturesUnitTest` and `SheetaAppRobolectricSmokeTest`.
 
 ## v0.4.1 (2026-11-26)
 

@@ -159,7 +159,7 @@ class V041SearchEnginesUnitTest {
 
     @Test
     fun `auto mode follows user-editable fallback order when primary fails or returns empty`() = runTest {
-        val visited = mutableListOf<String>()
+        val visited = java.util.Collections.synchronizedList(mutableListOf<String>())
         val outcome = OnlineSearchManager.search(
             query = "Egypt solar energy",
             internetSearchEnabled = true,
@@ -186,8 +186,9 @@ class V041SearchEnginesUnitTest {
             }
         )
 
-        assertTrue(visited.first().startsWith("https://searx.example.org"))
+        assertTrue(visited.any { it.startsWith("https://searx.example.org") })
         assertTrue(visited.any { it.contains("wikipedia.org") })
+        assertEquals("SearXNG", outcome.perEngineReports.first().engineName)
         assertEquals("DuckDuckGo", outcome.engineUsed)
         assertEquals(1, outcome.sources.size)
     }
