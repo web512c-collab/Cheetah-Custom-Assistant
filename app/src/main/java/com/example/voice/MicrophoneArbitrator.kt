@@ -19,7 +19,7 @@ enum class MicOwner {
 
 /**
  * Process-wide single-owner microphone coordinator.
- * Prevents WakeWordDetectionService AudioRecord from colliding with SpeechRecognizer
+ * Prevents WakeWordDetectionService AudioRecord from colliding with Vosk STT
  * or WakeWordEnrollmentRecorder on Android hardware that supports only one active capture client.
  */
 object MicrophoneArbitrator {

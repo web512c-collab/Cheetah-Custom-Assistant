@@ -565,6 +565,44 @@ fun SettingsScreen(
                         }
                     }
 
+                    if (wakeTabIndex == 0 && enrolledSamples.size >= VoiceTemplateStore.MIN_REQUIRED_SAMPLES && !settings.continuousListeningEnabled) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Surface(
+                            color = CheetahEmerald.copy(alpha = 0.14f),
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, CheetahEmerald.copy(alpha = 0.55f))
+                        ) {
+                            Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(
+                                    text = "تم تسجيل ${enrolledSamples.size} بصمات بنجاح! تقدر الآن تشغّل الاستماع في الخلفية لكلمة «${settings.wakePhrase}».",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = CheetahEmerald,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Button(
+                                    onClick = {
+                                        if (!permissions.hasMicPermission) {
+                                            onToggleMicSwitch(true)
+                                        } else {
+                                            onToggleContinuousListening(true)
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = CheetahEmerald),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(48.dp)
+                                        .testTag("settings_enable_bg_after_enroll_btn")
+                                ) {
+                                    Text(
+                                        text = "تشغيل الاستماع في الخلفية الآن",
+                                        color = CheetahObsidian,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     if (!enrollmentFeedbackAr.isNullOrBlank()) {
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
@@ -930,19 +968,14 @@ fun SettingsScreen(
                 )
             }
 
-            // 7. KEYLESS INTERNET SEARCH & PARALLEL ENGINE SELECTOR
+            // 7. KEYLESS INTERNET SEARCH & ENGINE SELECTOR
             item {
                 KeylessInternetSearchCard(
                     settings = settings,
                     isTestingSearch = isTestingSearch,
                     searchTestResult = searchTestResult,
                     onToggleInternetSearch = { en -> onSetInternetSearch(en, null) },
-                    onSaveCustomSearxngUrl = { url -> onSetInternetSearch(settings.internetSearchEnabled, url) },
                     onSelectSearchEngine = onSelectSearchEngine,
-                    onUpdateAutoSearchOrder = onUpdateAutoSearchOrder,
-                    onToggleSearchEngine = onToggleSearchEngine,
-                    onToggleFetchPageExcerpts = onToggleFetchPageExcerpts,
-                    onTestSearxngConnection = onTestSearxngConnection,
                     onTestSearch = onTestSearchEngine
                 )
             }
@@ -1151,6 +1184,18 @@ fun SettingsScreen(
                                     onResetAiDefaults = onResetAiDefaults,
                                     onExportAiConfig = onExportAiConfig,
                                     onImportAiConfig = onImportAiConfig
+                                )
+
+                                AdvancedSearchExpertCard(
+                                    settings = settings,
+                                    isTestingSearch = isTestingSearch,
+                                    onSaveCustomSearxngUrl = { url ->
+                                        onSetInternetSearch(settings.internetSearchEnabled, url)
+                                    },
+                                    onUpdateAutoSearchOrder = onUpdateAutoSearchOrder,
+                                    onToggleSearchEngine = onToggleSearchEngine,
+                                    onToggleFetchPageExcerpts = onToggleFetchPageExcerpts,
+                                    onTestSearxngConnection = onTestSearxngConnection
                                 )
 
                                 WakeDiagnosticConsoleCard(

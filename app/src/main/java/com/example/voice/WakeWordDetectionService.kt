@@ -54,7 +54,7 @@ import kotlin.math.max
  * Reliability architecture (BUG A1 & BUG A2):
  * - Deterministic 5-state machine (WakeStateMachine) logged to CheetahRuntimeBus.
  * - Per-state watchdog timer + try/finally cycle cleanup guarantees automatic return to IDLE_WAKE_LISTENING.
- * - Single-owner MicrophoneArbitrator prevents AudioRecord vs SpeechRecognizer hardware collisions.
+ * - Single-owner MicrophoneArbitrator prevents AudioRecord vs Vosk STT hardware collisions.
  * - AudioRecord dead-object/zero-read recovery counter + supervisor loop restart + AlarmManager watchdog.
  */
 class WakeWordDetectionService : Service() {
@@ -574,7 +574,7 @@ class WakeWordDetectionService : Service() {
                             } else {
                                 CheetahRuntimeBus.updateDiagnostics {
                                     it.copy(
-                                        lastAudioEvent = "سجل بصمة صوتية لكلمة التنبيه أو استخدم 'يا شيتا' للنموذج المدمج",
+                                        lastAudioEvent = "مطلوب تسجيل 5 عينات بصوتك لكلمة التنبيه أو التحقق النصي عبر Vosk",
                                         ambientNoiseRms = noiseFloorRms
                                     )
                                 }

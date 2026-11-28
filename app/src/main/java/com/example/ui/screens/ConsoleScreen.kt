@@ -247,7 +247,7 @@ fun ConsoleScreen(
                                 )
                                 Text(
                                     text = when {
-                                        !permissions.hasMicPermission -> "محتاج صلاحية المايكروفون"
+                                        !permissions.hasMicPermission -> "إذن الميكروفون مش متاح — فعّله من الإعدادات"
                                         serviceRunning && settings.isListeningMuted -> "مكتوم مؤقتاً (Kill-Switch)"
                                         serviceRunning -> "الخدمة شغالة أوفلاين • ${settings.wakeSetupMode.labelAr}"
                                         else -> "الاستماع في الخلفية مقفول"
@@ -383,13 +383,7 @@ fun ConsoleScreen(
                         ArcCoreOrb(
                             pipelineState = pipelineState,
                             micLevel = liveMicLevel,
-                            onClick = {
-                                if (!permissions.hasMicPermission || !offlineSttStatus.hasModelConfigured) {
-                                    onStartVoiceCommand() // surfaces mapped notice banner without OS prompt
-                                } else {
-                                    onStartVoiceCommand()
-                                }
-                            }
+                            onClick = onStartVoiceCommand
                         )
 
                         Spacer(modifier = Modifier.height(14.dp))

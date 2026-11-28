@@ -640,21 +640,9 @@ fun KeylessInternetSearchCard(
     isTestingSearch: Boolean = false,
     searchTestResult: SearchEngineTestResult? = null,
     onToggleInternetSearch: (Boolean) -> Unit,
-    onSaveCustomSearxngUrl: (String) -> Unit,
     onSelectSearchEngine: (SearchEngineMode) -> Unit = {},
-    onUpdateAutoSearchOrder: (List<ConcreteSearchEngine>) -> Unit = {},
-    onToggleSearchEngine: (ConcreteSearchEngine, Boolean) -> Unit = { _, _ -> },
-    onToggleFetchPageExcerpts: (Boolean) -> Unit = {},
-    onTestSearxngConnection: (String) -> Unit = {},
     onTestSearch: () -> Unit = {}
 ) {
-    var draftSearxngUrl by remember(settings.customSearxngUrl) {
-        mutableStateOf(settings.customSearxngUrl)
-    }
-    val urlInvalid = draftSearxngUrl.isNotBlank() && !OnlineSearchManager.isValidHttpsUrl(draftSearxngUrl)
-    val effectiveOrder = remember(settings.autoSearchOrder) {
-        OnlineSearchManager.normalizeOrder(settings.autoSearchOrder)
-    }
 
     Card(
         colors = CardDefaults.cardColors(containerColor = CheetahCard),
@@ -779,213 +767,38 @@ fun KeylessInternetSearchCard(
                     )
                 }
 
-                // Editable parallel priority & per-engine toggles when Auto is chosen
-                if (settings.searchEngineMode == SearchEngineMode.AUTO) {
+                // Basic view: if user explicitly picked SearXNG, keep quick URL field reachable; otherwise move
+                // engine order, per-engine toggles, excerpt fetching & SearXNG config into collapsed Advanced card.
+                if (settings.searchEngineMode == SearchEngineMode.SEARXNG) {
                     Spacer(modifier = Modifier.height(10.dp))
                     Text(
-                        text = "محركات البحث المتوازية (مفعّل / ترتيب الدمج):",
-                        style = MaterialTheme.typography.labelMedium,
+                        text = if (settings.customSearxngUrl.isBlank()) {
+                            "أدخل رابط خادم SearXNG (https://) من «إعدادات متقدمة (Advanced)» بالأسفل."
+                        } else {
+                            "الخادم الحالي: ${settings.customSearxngUrl}"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
                         color = CheetahAmber
                     )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        effectiveOrder.forEachIndexed { idx, engine ->
-                            val engineEnabled = engine in settings.enabledSearchEngines
-                            Surface(
-                                color = CheetahDeepNavy,
-                                shape = RoundedCornerShape(10.dp),
-                                border = BorderStroke(1.dp, if (engineEnabled) CheetahBorder else CheetahBorder.copy(alpha = 0.4f))
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 10.dp, vertical = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.weight(1f)
-                                    ) {
-                                        Switch(
-                                            checked = engineEnabled,
-                                            onCheckedChange = { checked -> onToggleSearchEngine(engine, checked) },
-                                            colors = SwitchDefaults.colors(
-                                                checkedThumbColor = CheetahObsidian,
-                                                checkedTrackColor = CheetahEmerald
-                                            ),
-                                            modifier = Modifier.testTag("settings_engine_toggle_${engine.name.lowercase()}")
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            text = "${idx + 1}. ${engine.labelAr}",
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            color = if (engineEnabled) CheetahTextPrimary else CheetahTextSecondary,
-                                            fontWeight = if (idx == 0) FontWeight.Bold else FontWeight.Normal
-                                        )
-                                    }
-                                    Row {
-                                        TextButton(
-                                            onClick = {
-                                                if (idx > 0) {
-                                                    val mutable = effectiveOrder.toMutableList()
-                                                    val tmp = mutable[idx - 1]
-                                                    mutable[idx - 1] = mutable[idx]
-                                                    mutable[idx] = tmp
-                                                    onUpdateAutoSearchOrder(mutable)
-                                                }
-                                            },
-                                            enabled = idx > 0,
-                                            modifier = Modifier
-                                                .size(48.dp)
-                                                .testTag("settings_engine_up_${engine.name.lowercase()}")
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.ArrowUpward,
-                                                contentDescription = "رفع ${engine.labelAr} للأعلى",
-                                                tint = if (idx > 0) CheetahCyan else CheetahTextSecondary
-                                            )
-                                        }
-                                        TextButton(
-                                            onClick = {
-                                                if (idx < effectiveOrder.lastIndex) {
-                                                    val mutable = effectiveOrder.toMutableList()
-                                                    val tmp = mutable[idx + 1]
-                                                    mutable[idx + 1] = mutable[idx]
-                                                    mutable[idx] = tmp
-                                                    onUpdateAutoSearchOrder(mutable)
-                                                }
-                                            },
-                                            enabled = idx < effectiveOrder.lastIndex,
-                                            modifier = Modifier
-                                                .size(48.dp)
-                                                .testTag("settings_engine_down_${engine.name.lowercase()}")
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.ArrowDownward,
-                                                contentDescription = "تنزيل ${engine.labelAr} للأسفل",
-                                                tint = if (idx < effectiveOrder.lastIndex) CheetahCyan else CheetahTextSecondary
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
 
                 Spacer(modifier = Modifier.height(10.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                Button(
+                    onClick = onTestSearch,
+                    enabled = !isTestingSearch,
+                    colors = ButtonDefaults.buttonColors(containerColor = CheetahEmerald),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("settings_test_search_btn")
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "جلب مقتطف قراءة من أعلى الصفحات",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = CheetahTextPrimary
-                        )
-                        Text(
-                            text = "يجلب حتى 120 KB عبر HTTPS لأول صفحتين لتحسين تقييم النتائج.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = CheetahTextSecondary
-                        )
-                    }
-                    Switch(
-                        checked = settings.fetchPageExcerpts,
-                        onCheckedChange = onToggleFetchPageExcerpts,
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = CheetahObsidian,
-                            checkedTrackColor = CheetahCyan
-                        ),
-                        modifier = Modifier.testTag("settings_fetch_excerpts_switch")
-                    )
-                }
-
-                // Custom SearXNG URL + Save + Test connection
-                Spacer(modifier = Modifier.height(12.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    OutlinedTextField(
-                        value = draftSearxngUrl,
-                        onValueChange = { draftSearxngUrl = it },
-                        label = { Text("رابط SearXNG (HTTPS فقط)") },
-                        placeholder = { Text("https://searx.example.org") },
-                        singleLine = true,
-                        isError = urlInvalid,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = CheetahCyan,
-                            unfocusedBorderColor = CheetahBorder
-                        ),
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("settings_searxng_url_input")
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Button(
-                        onClick = {
-                            if (!urlInvalid) {
-                                onSaveCustomSearxngUrl(draftSearxngUrl.trim())
-                            }
-                        },
-                        enabled = !urlInvalid,
-                        colors = ButtonDefaults.buttonColors(containerColor = CheetahCyan),
-                        modifier = Modifier
-                            .height(52.dp)
-                            .testTag("settings_save_searxng_btn")
-                    ) {
-                        Text("حفظ", color = CheetahObsidian, fontWeight = FontWeight.Bold)
-                    }
-                }
-                if (urlInvalid) {
+                    Icon(Icons.Default.Search, contentDescription = null, tint = CheetahObsidian, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "يجب أن يبدأ الرابط بـ https:// فقط.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = CheetahCrimson
+                        text = if (isTestingSearch) "جاري الفحص..." else "تجربة البحث الآن",
+                        color = CheetahObsidian,
+                        fontWeight = FontWeight.Bold
                     )
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = {
-                            if (!urlInvalid) {
-                                onSaveCustomSearxngUrl(draftSearxngUrl.trim())
-                                onTestSearxngConnection(draftSearxngUrl.trim())
-                            }
-                        },
-                        enabled = !isTestingSearch && draftSearxngUrl.isNotBlank() && !urlInvalid,
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp)
-                            .testTag("settings_test_searxng_btn")
-                    ) {
-                        Text("اختبار اتصال SearXNG", color = CheetahAmber)
-                    }
-
-                    Button(
-                        onClick = onTestSearch,
-                        enabled = !isTestingSearch,
-                        colors = ButtonDefaults.buttonColors(containerColor = CheetahEmerald),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp)
-                            .testTag("settings_test_search_btn")
-                    ) {
-                        Icon(Icons.Default.Search, contentDescription = null, tint = CheetahObsidian, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = if (isTestingSearch) "جاري الفحص..." else "تجربة البحث الآن",
-                            color = CheetahObsidian,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
                 }
 
                 if (isTestingSearch) {
@@ -1029,6 +842,214 @@ fun KeylessInternetSearchCard(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun AdvancedSearchExpertCard(
+    settings: AssistantSettings,
+    isTestingSearch: Boolean = false,
+    onSaveCustomSearxngUrl: (String) -> Unit,
+    onUpdateAutoSearchOrder: (List<ConcreteSearchEngine>) -> Unit,
+    onToggleSearchEngine: (ConcreteSearchEngine, Boolean) -> Unit,
+    onToggleFetchPageExcerpts: (Boolean) -> Unit,
+    onTestSearxngConnection: (String) -> Unit
+) {
+    var draftSearxngUrl by remember(settings.customSearxngUrl) {
+        mutableStateOf(settings.customSearxngUrl)
+    }
+    val urlInvalid = draftSearxngUrl.isNotBlank() && !OnlineSearchManager.isValidHttpsUrl(draftSearxngUrl)
+    val effectiveOrder = remember(settings.autoSearchOrder) {
+        OnlineSearchManager.normalizeOrder(settings.autoSearchOrder)
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = CheetahDeepNavy),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, CheetahBorder)
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(
+                text = "إعدادات البحث المتقدمة (ترتيب المحركات و SearXNG)",
+                style = MaterialTheme.typography.titleSmall,
+                color = CheetahCyan,
+                fontWeight = FontWeight.Bold
+            )
+
+            Text(
+                text = "ترتيب وتفعيل المحركات في الوضع التلقائي (Auto):",
+                style = MaterialTheme.typography.labelMedium,
+                color = CheetahAmber
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                effectiveOrder.forEachIndexed { idx, engine ->
+                    val engineEnabled = engine in settings.enabledSearchEngines
+                    Surface(
+                        color = CheetahCard,
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, if (engineEnabled) CheetahBorder else CheetahBorder.copy(alpha = 0.4f))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                Switch(
+                                    checked = engineEnabled,
+                                    onCheckedChange = { checked -> onToggleSearchEngine(engine, checked) },
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = CheetahObsidian,
+                                        checkedTrackColor = CheetahEmerald
+                                    ),
+                                    modifier = Modifier.testTag("settings_engine_toggle_${engine.name.lowercase()}")
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "${idx + 1}. ${engine.labelAr}",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (engineEnabled) CheetahTextPrimary else CheetahTextSecondary,
+                                    fontWeight = if (idx == 0) FontWeight.Bold else FontWeight.Normal
+                                )
+                            }
+                            Row {
+                                TextButton(
+                                    onClick = {
+                                        if (idx > 0) {
+                                            val mutable = effectiveOrder.toMutableList()
+                                            val tmp = mutable[idx - 1]
+                                            mutable[idx - 1] = mutable[idx]
+                                            mutable[idx] = tmp
+                                            onUpdateAutoSearchOrder(mutable)
+                                        }
+                                    },
+                                    enabled = idx > 0,
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("settings_engine_up_${engine.name.lowercase()}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ArrowUpward,
+                                        contentDescription = "رفع ${engine.labelAr} للأعلى",
+                                        tint = if (idx > 0) CheetahCyan else CheetahTextSecondary
+                                    )
+                                }
+                                TextButton(
+                                    onClick = {
+                                        if (idx < effectiveOrder.lastIndex) {
+                                            val mutable = effectiveOrder.toMutableList()
+                                            val tmp = mutable[idx + 1]
+                                            mutable[idx + 1] = mutable[idx]
+                                            mutable[idx] = tmp
+                                            onUpdateAutoSearchOrder(mutable)
+                                        }
+                                    },
+                                    enabled = idx < effectiveOrder.lastIndex,
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("settings_engine_down_${engine.name.lowercase()}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ArrowDownward,
+                                        contentDescription = "تنزيل ${engine.labelAr} للأسفل",
+                                        tint = if (idx < effectiveOrder.lastIndex) CheetahCyan else CheetahTextSecondary
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "جلب مقتطف قراءة من أعلى الصفحات",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = CheetahTextPrimary
+                    )
+                    Text(
+                        text = "يجلب حتى 120 KB عبر HTTPS لأول صفحتين لتحسين تقييم النتائج.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = CheetahTextSecondary
+                    )
+                }
+                Switch(
+                    checked = settings.fetchPageExcerpts,
+                    onCheckedChange = onToggleFetchPageExcerpts,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = CheetahObsidian,
+                        checkedTrackColor = CheetahCyan
+                    ),
+                    modifier = Modifier.testTag("settings_fetch_excerpts_switch")
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = draftSearxngUrl,
+                    onValueChange = { draftSearxngUrl = it },
+                    label = { Text("رابط SearXNG (HTTPS فقط)") },
+                    placeholder = { Text("https://searx.example.org") },
+                    singleLine = true,
+                    isError = urlInvalid,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = CheetahCyan,
+                        unfocusedBorderColor = CheetahBorder
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("settings_searxng_url_input")
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Button(
+                    onClick = {
+                        if (!urlInvalid) {
+                            onSaveCustomSearxngUrl(draftSearxngUrl.trim())
+                        }
+                    },
+                    enabled = !urlInvalid,
+                    colors = ButtonDefaults.buttonColors(containerColor = CheetahCyan),
+                    modifier = Modifier
+                        .height(52.dp)
+                        .testTag("settings_save_searxng_btn")
+                ) {
+                    Text("حفظ", color = CheetahObsidian, fontWeight = FontWeight.Bold)
+                }
+            }
+            if (urlInvalid) {
+                Text(
+                    text = "يجب أن يبدأ الرابط بـ https:// فقط.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = CheetahCrimson
+                )
+            }
+
+            OutlinedButton(
+                onClick = {
+                    if (!urlInvalid) {
+                        onSaveCustomSearxngUrl(draftSearxngUrl.trim())
+                        onTestSearxngConnection(draftSearxngUrl.trim())
+                    }
+                },
+                enabled = !isTestingSearch && draftSearxngUrl.isNotBlank() && !urlInvalid,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .testTag("settings_test_searxng_btn")
+            ) {
+                Text("اختبار اتصال SearXNG", color = CheetahAmber)
             }
         }
     }
