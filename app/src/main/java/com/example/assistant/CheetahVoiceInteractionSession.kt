@@ -9,6 +9,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
 import com.example.R
+import com.example.controller.PermissionHealthChecker
 import com.example.data.ConversationMemoryStore
 import com.example.data.SettingsRepository
 import com.example.intelligence.AssistantCommandProcessor
@@ -17,6 +18,7 @@ import com.example.voice.EgyptianOfflineSttManager
 import com.example.voice.EgyptianTtsManager
 import com.example.voice.MicOwner
 import com.example.voice.MicrophoneArbitrator
+import com.example.voice.VoiceErrorMapper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -86,7 +88,14 @@ class CheetahVoiceInteractionSession(context: Context) : VoiceInteractionSession
                     processCommand(finalText)
                 },
                 onFailure = { err ->
-                    transcriptView?.text = err.message ?: "تعذر الاستماع"
+                    val hasMic = PermissionHealthChecker.inspect(context).hasMicPermission
+                    val hasModel = sttManager.isOnDeviceSupported()
+                    val mapped = VoiceErrorMapper.mapFailure(
+                        rawReason = err.message,
+                        hasMicPermission = hasMic,
+                        hasLocalSttModel = hasModel
+                    )
+                    transcriptView?.text = mapped.messageAr
                 }
             )
         }

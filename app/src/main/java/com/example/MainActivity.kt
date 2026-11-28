@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Architecture
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Settings
@@ -55,7 +54,6 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.example.controller.PermissionHealthChecker
 import com.example.ui.screens.AboutScreen
-import com.example.ui.screens.ArchitectureScreen
 import com.example.ui.screens.ConsoleScreen
 import com.example.ui.screens.GgufStorageModeDialog
 import com.example.ui.screens.SettingsScreen
@@ -74,7 +72,6 @@ import kotlinx.coroutines.withContext
 
 private const val ROUTE_CONSOLE = "console"
 private const val ROUTE_SETTINGS = "settings"
-private const val ROUTE_ARCHITECTURE = "architecture"
 private const val ROUTE_ABOUT = "about"
 
 private data class NavDestination(
@@ -87,7 +84,6 @@ private data class NavDestination(
 private val CHEETAH_DESTINATIONS = listOf(
     NavDestination(ROUTE_CONSOLE, "القيادة", Icons.Default.GraphicEq, "nav_console"),
     NavDestination(ROUTE_SETTINGS, "الإعدادات", Icons.Default.Settings, "nav_settings"),
-    NavDestination(ROUTE_ARCHITECTURE, "الهندسة", Icons.Default.Architecture, "nav_architecture"),
     NavDestination(ROUTE_ABOUT, "عن التطبيق", Icons.Default.Info, "nav_about")
 )
 
@@ -146,9 +142,15 @@ fun CheetahAppRoot(
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val rules by viewModel.rules.collectAsStateWithLifecycle()
     val enrolledSamples by viewModel.enrolledSamples.collectAsStateWithLifecycle()
+    val wakeCalibration by viewModel.wakeCalibration.collectAsStateWithLifecycle()
+    val wakeTestState by viewModel.wakeTestState.collectAsStateWithLifecycle()
+    val selfTestState by viewModel.selfTestState.collectAsStateWithLifecycle()
     val permissions by viewModel.permissionHealth.collectAsStateWithLifecycle()
     val ttsStatus by viewModel.ttsStatus.collectAsStateWithLifecycle()
     val offlineSttStatus by viewModel.offlineSttStatus.collectAsStateWithLifecycle()
+    val isImportingSttModel by viewModel.isImportingSttModel.collectAsStateWithLifecycle()
+    val sttImportFeedbackAr by viewModel.sttImportFeedbackAr.collectAsStateWithLifecycle()
+    val voiceErrorBanner by viewModel.voiceErrorBanner.collectAsStateWithLifecycle()
     val diagnostics by viewModel.diagnostics.collectAsStateWithLifecycle()
     val transitionLog by viewModel.transitionLog.collectAsStateWithLifecycle()
     val localLlmStatus by viewModel.localLlmStatus.collectAsStateWithLifecycle()
@@ -192,8 +194,10 @@ fun CheetahAppRoot(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         viewModel.refreshPermissions()
-        if (granted) {
-            viewModel.setMicFeatureEnabled(true)
+        if (!granted) {
+            uiScope.launch {
+                snackbarHostState.showSnackbar("تم رفض إذن المايكروفون — يمكنك منحه لاحقاً من إعدادات التطبيق.")
+            }
         }
     }
 
@@ -201,8 +205,10 @@ fun CheetahAppRoot(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         viewModel.refreshPermissions()
-        if (granted) {
-            viewModel.setNotificationsFeatureEnabled(true)
+        if (!granted) {
+            uiScope.launch {
+                snackbarHostState.showSnackbar("تم رفض إذن الإشعارات — يمكنك تفعيله من إعدادات التطبيق.")
+            }
         }
     }
 
@@ -215,6 +221,14 @@ fun CheetahAppRoot(
     ) { uri ->
         if (uri != null) {
             viewModel.inspectPickedGgufUri(uri)
+        }
+    }
+
+    val sttZipPickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.importSttModelZip(uri)
         }
     }
 
@@ -266,39 +280,51 @@ fun CheetahAppRoot(
         }
     }
 
-    // Bug A3 compliant permission switch handlers: never re-prompt if granted; route permanent denial to App Info
+    // OS permission is the SINGLE source of truth: prompt only on first/recoverable toggle ON,
+    // route permanent denial or revocation to Android App Info settings.
     val handleMicSwitchToggle: (Boolean) -> Unit = { wantOn ->
+        val osGranted = PermissionHealthChecker.inspect(context).hasMicPermission
         if (!wantOn) {
-            viewModel.setMicFeatureEnabled(false)
-        } else {
-            val osGranted = PermissionHealthChecker.inspect(context).hasMicPermission
             if (osGranted) {
-                viewModel.setMicFeatureEnabled(true)
-            } else if (PermissionHealthChecker.isPermissionPermanentlyDenied(
-                    activity = activity,
-                    permission = Manifest.permission.RECORD_AUDIO,
-                    wasRequestedBefore = settings.micPermissionRequestedOnce
-                )
-            ) {
+                uiScope.launch {
+                    snackbarHostState.showSnackbar("نظام أندرويد يدير سحب الإذن من شاشة الأذونات.")
+                }
                 runCatching {
                     context.startActivity(PermissionHealthChecker.buildAppDetailsSettingsIntent(context))
                 }
-            } else {
-                viewModel.markMicPermissionRequestedOnce()
-                micLauncher.launch(Manifest.permission.RECORD_AUDIO)
             }
+            viewModel.refreshPermissions()
+        } else if (osGranted) {
+            viewModel.refreshPermissions()
+        } else if (PermissionHealthChecker.isPermissionPermanentlyDenied(
+                activity = activity,
+                permission = Manifest.permission.RECORD_AUDIO,
+                wasRequestedBefore = settings.micPermissionRequestedOnce
+            )
+        ) {
+            runCatching {
+                context.startActivity(PermissionHealthChecker.buildAppDetailsSettingsIntent(context))
+            }
+        } else {
+            viewModel.markMicPermissionRequestedOnce()
+            micLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
 
     val handleNotifSwitchToggle: (Boolean) -> Unit = { wantOn ->
-        if (!wantOn) {
-            viewModel.setNotificationsFeatureEnabled(false)
-        } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            viewModel.setNotificationsFeatureEnabled(true)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            viewModel.refreshPermissions()
         } else {
             val osGranted = PermissionHealthChecker.inspect(context).hasNotificationPermission
-            if (osGranted) {
-                viewModel.setNotificationsFeatureEnabled(true)
+            if (!wantOn) {
+                if (osGranted) {
+                    runCatching {
+                        context.startActivity(PermissionHealthChecker.buildAppDetailsSettingsIntent(context))
+                    }
+                }
+                viewModel.refreshPermissions()
+            } else if (osGranted) {
+                viewModel.refreshPermissions()
             } else if (PermissionHealthChecker.isPermissionPermanentlyDenied(
                     activity = activity,
                     permission = Manifest.permission.POST_NOTIFICATIONS,
@@ -400,6 +426,8 @@ fun CheetahAppRoot(
                             ConsoleScreen(
                                 settings = settings,
                                 permissions = permissions,
+                                offlineSttStatus = offlineSttStatus,
+                                voiceErrorBanner = voiceErrorBanner,
                                 serviceRunning = serviceRunning,
                                 liveMicLevel = liveMicLevel,
                                 pipelineState = pipelineState,
@@ -412,6 +440,7 @@ fun CheetahAppRoot(
                                 pendingContinuationText = pendingContinuationText,
                                 pendingProposedAction = pendingProposedAction,
                                 onStartVoiceCommand = { viewModel.startVoiceCommand() },
+                                onDismissVoiceError = { viewModel.dismissVoiceError() },
                                 onSubmitTextCommand = { viewModel.submitTextCommand(it) },
                                 onSubmitTextWithAttachment = { cmd, att ->
                                     viewModel.submitTextWithAttachment(cmd, att)
@@ -423,11 +452,12 @@ fun CheetahAppRoot(
                                 onContinueSpeech = { viewModel.continueSpeakingLongReply() },
                                 onToggleContinuousListening = { viewModel.toggleContinuousListening(it) },
                                 onToggleMute = { viewModel.toggleMute() },
-                                onRequestMicPermission = { handleMicSwitchToggle(true) },
                                 onCancelLlmGeneration = { viewModel.cancelLlmGeneration() },
                                 onOpenSettingsTab = {
                                     navController.navigate(ROUTE_SETTINGS) {
+                                        popUpTo(ROUTE_CONSOLE) { saveState = true }
                                         launchSingleTop = true
+                                        restoreState = true
                                     }
                                 }
                             )
@@ -438,9 +468,14 @@ fun CheetahAppRoot(
                                 settings = settings,
                                 rules = rules,
                                 enrolledSamples = enrolledSamples,
+                                wakeCalibration = wakeCalibration,
+                                wakeTestState = wakeTestState,
+                                selfTestState = selfTestState,
                                 permissions = permissions,
                                 ttsStatus = ttsStatus,
                                 offlineSttStatus = offlineSttStatus,
+                                isImportingSttModel = isImportingSttModel,
+                                sttImportFeedbackAr = sttImportFeedbackAr,
                                 diagnostics = diagnostics,
                                 transitionLog = transitionLog,
                                 localLlmStatus = localLlmStatus,
@@ -482,6 +517,8 @@ fun CheetahAppRoot(
                                 onUpdateVoiceMatch = { en, thr, fb ->
                                     viewModel.updateVoiceMatch(en, thr, fb)
                                 },
+                                onStartWakeTenSayTest = { viewModel.startWakeTenSayTest() },
+                                onStopWakeTenSayTest = { viewModel.stopWakeTenSayTest() },
                                 onUpdateWakeAckPhrase = { viewModel.updateWakeAckPhrase(it) },
                                 onUpdatePersonaTone = { viewModel.updatePersonaTone(it) },
                                 onUpdateTtsTuning = { r, p -> viewModel.updateTtsTuning(r, p) },
@@ -512,7 +549,21 @@ fun CheetahAppRoot(
                                         )
                                     }
                                 },
+                                onOpenAutoRevokeSettings = {
+                                    runCatching {
+                                        context.startActivity(
+                                            PermissionHealthChecker.buildAutoRevokeIntent(context)
+                                        )
+                                    }
+                                },
+                                onDismissAutoRevokeTip = { viewModel.dismissAutoRevokeTip() },
                                 onRefreshPermissions = { viewModel.refreshPermissions() },
+                                onPickSttModelZip = {
+                                    sttZipPickerLauncher.launch(
+                                        arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream", "*/*")
+                                    )
+                                },
+                                onRemoveSttModel = { viewModel.removeSttModel() },
                                 onPickGgufModel = { ggufPickerLauncher.launch(arrayOf("*/*")) },
                                 onLoadGgufModel = { viewModel.loadGgufModel() },
                                 onUnloadGgufModel = { viewModel.unloadGgufModel() },
@@ -565,6 +616,7 @@ fun CheetahAppRoot(
                                 onToggleFetchPageExcerpts = { en -> viewModel.setFetchPageExcerpts(en) },
                                 onTestSearxngConnection = { url -> viewModel.testSearxngConnection(url) },
                                 onTestSearchEngine = { viewModel.testSearchWithSelectedEngine() },
+                                onRunThreeStageSelfTest = { viewModel.runThreeStageSelfTest() },
                                 onRunMicDiagnosticTest = { viewModel.runControlledMicDiagnosticTest() },
                                 onMarkFalseActivation = { viewModel.markFalseActivation() },
                                 onResetDiagnosticCounters = { viewModel.resetDiagnosticCounters() },
@@ -573,16 +625,6 @@ fun CheetahAppRoot(
                                 onDeleteShortcut = { id -> viewModel.deletePersonalShortcut(id) },
                                 onDeleteMemoryEntry = { id -> viewModel.deleteMemoryEntry(id) },
                                 onClearAllMemory = { viewModel.clearAllMemory() }
-                            )
-                        }
-
-                        composable(ROUTE_ARCHITECTURE) {
-                            ArchitectureScreen(
-                                offlineSttStatus = offlineSttStatus,
-                                ttsStatus = ttsStatus,
-                                enrolledTemplatesCount = enrolledSamples.size,
-                                internetSearchEnabled = settings.internetSearchEnabled,
-                                localLlmStatus = localLlmStatus
                             )
                         }
 

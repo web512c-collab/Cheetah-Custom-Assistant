@@ -1,85 +1,293 @@
 package com.example.voice
 
 import android.Manifest
+import android.annotation.SuppressLint
+import android.app.ActivityManager
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
-import android.os.Build
-import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
+import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.core.content.ContextCompat
+import com.example.data.SettingsRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import org.vosk.LibVosk
+import org.vosk.LogLevel
+import org.vosk.Model
+import org.vosk.Recognizer
+import java.io.BufferedInputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.zip.ZipInputStream
 import kotlin.coroutines.resume
+import kotlin.math.sqrt
 
 data class OfflineSttStatus(
     val isRecognizerAvailable: Boolean,
     val isOnDeviceApiAvailable: Boolean,
     val engineModeLabelAr: String,
-    val statusDetailAr: String
+    val statusDetailAr: String,
+    val hasModelConfigured: Boolean = false,
+    val isModelLoaded: Boolean = false,
+    val modelName: String = "",
+    val modelDir: String = "",
+    val modelSizeBytes: Long = 0L,
+    val modelLanguage: String = "ar",
+    val lastErrorAr: String? = null
+)
+
+data class ImportedSttModel(
+    val modelDir: String,
+    val displayName: String,
+    val sizeBytes: Long,
+    val languageTag: String
 )
 
 /**
- * Local/On-Device Speech-to-Text manager configured for Egyptian Colloquial Arabic (ar-EG).
- * Hardened against OEM SpeechRecognizer hangs & AudioRecord hardware contention:
- * - Dispatches all SpeechRecognizer operations onto Main Looper
- * - Guards callbacks with sessionId + AtomicBoolean so stale callbacks never corrupt state
- * - Isolates stopListening/cancel/destroy calls so OEM DeadObjectException never leaks recognizer
- * - Always clears CheetahRuntimeBus.isSttActive on completion, error, timeout, or cancellation
+ * Pure offline on-device Speech-to-Text manager powered by Vosk Android + AudioRecord 16kHz PCM
+ * with energy/hangover VAD endpointing.
+ * Zero dependency on android.speech.SpeechRecognizer or Google Speech Services.
  */
 class EgyptianOfflineSttManager(private val context: Context) {
 
     private val appContext = context.applicationContext
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private var recognizer: SpeechRecognizer? = null
-    private var timeoutRunnable: Runnable? = null
+    private val settingsRepo by lazy { SettingsRepository(appContext) }
+    private val captureScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val sessionSeq = AtomicLong(0L)
+    private val modelLock = Any()
 
-    fun isOnDeviceSupported(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext)
-        } else {
-            SpeechRecognizer.isRecognitionAvailable(appContext)
+    @Volatile
+    private var captureJob: Job? = null
+
+    @Volatile
+    private var activeModel: Model? = null
+
+    @Volatile
+    private var activeModelDir: String = ""
+
+    @Volatile
+    private var lastLoadErrorAr: String? = null
+
+    fun isOnDeviceSupported(): Boolean = resolveConfiguredModelDir() != null
+
+    fun resolveConfiguredModelDir(explicitDir: String = ""): File? {
+        val candidates = buildList {
+            if (explicitDir.isNotBlank()) add(File(explicitDir))
+            val modelsBase = File(appContext.filesDir, MODELS_DIR_NAME)
+            if (modelsBase.exists() && modelsBase.isDirectory) {
+                modelsBase.listFiles()
+                    ?.filter { it.isDirectory && !it.name.startsWith(".staging_") }
+                    ?.sortedByDescending { it.lastModified() }
+                    ?.forEach { add(it) }
+            }
+        }
+        return candidates.firstOrNull { containsVoskModelFiles(it) }
+    }
+
+    fun inspectCapability(
+        configuredDir: String = "",
+        configuredName: String = "",
+        configuredSizeBytes: Long = 0L,
+        configuredLang: String = "ar"
+    ): OfflineSttStatus {
+        val resolvedDir = resolveConfiguredModelDir(configuredDir)
+        if (resolvedDir == null) {
+            return OfflineSttStatus(
+                isRecognizerAvailable = false,
+                isOnDeviceApiAvailable = false,
+                engineModeLabelAr = "لا يوجد نموذج كلام محلي",
+                statusDetailAr = "التعرف أوفلاين بدون جوجل جاهز لاستيراد حزمة Vosk (.zip) من الإعدادات.",
+                hasModelConfigured = false,
+                isModelLoaded = false,
+                modelName = "",
+                modelDir = "",
+                modelSizeBytes = 0L,
+                modelLanguage = "ar",
+                lastErrorAr = lastLoadErrorAr
+            )
+        }
+
+        val name = configuredName.ifBlank { resolvedDir.name }
+        val sizeBytes = configuredSizeBytes.takeIf { it > 0L } ?: computeDirectorySize(resolvedDir)
+        val sizeMb = String.format(Locale.US, "%.1f", sizeBytes / (1024f * 1024f))
+        val lang = configuredLang.ifBlank { inferLanguageFromName(name) }
+        val loaded = activeModel != null && activeModelDir == resolvedDir.absolutePath
+
+        return OfflineSttStatus(
+            isRecognizerAvailable = true,
+            isOnDeviceApiAvailable = true,
+            engineModeLabelAr = if (loaded) "Vosk Offline (محمّل)" else "Vosk Offline (جاهز)",
+            statusDetailAr = "نموذج محلي أوفلاين 100%: $name ($sizeMb ميجابايت • لغة: $lang).",
+            hasModelConfigured = true,
+            isModelLoaded = loaded,
+            modelName = name,
+            modelDir = resolvedDir.absolutePath,
+            modelSizeBytes = sizeBytes,
+            modelLanguage = lang,
+            lastErrorAr = lastLoadErrorAr
+        )
+    }
+
+    suspend fun importModelFromUri(uri: Uri): Result<ImportedSttModel> = withContext(Dispatchers.IO) {
+        val rawName = queryDisplayName(uri) ?: "vosk-model"
+        val cleanBaseName = rawName
+            .replace(Regex("\\.zip$", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("[^a-zA-Z0-9._-]"), "_")
+            .ifBlank { "vosk_model_${System.currentTimeMillis()}" }
+
+        val modelsBase = File(appContext.filesDir, MODELS_DIR_NAME).apply { mkdirs() }
+        val stagingDir = File(modelsBase, ".staging_${System.currentTimeMillis()}").apply { mkdirs() }
+
+        return@withContext runCatching {
+            val stream = appContext.contentResolver.openInputStream(uri)
+                ?: error("تعذر فتح ملف نموذج الكلام المختار.")
+            var extractedBytes = 0L
+            stream.use { input ->
+                ZipInputStream(BufferedInputStream(input, 32 * 1024)).use { zis ->
+                    val stagingCanonical = stagingDir.canonicalPath + File.separator
+                    var entry = zis.nextEntry
+                    while (entry != null) {
+                        val target = File(stagingDir, entry.name)
+                        val targetCanonical = target.canonicalPath
+                        if (!targetCanonical.startsWith(stagingCanonical) && targetCanonical != stagingDir.canonicalPath) {
+                            error("ملف مضغوط غير آمن (مسار غير صالح).")
+                        }
+                        if (entry.isDirectory) {
+                            target.mkdirs()
+                        } else {
+                            target.parentFile?.mkdirs()
+                            FileOutputStream(target).use { out ->
+                                val buffer = ByteArray(16 * 1024)
+                                var read = zis.read(buffer)
+                                while (read != -1) {
+                                    out.write(buffer, 0, read)
+                                    extractedBytes += read
+                                    if (extractedBytes > MAX_EXTRACTED_MODEL_BYTES) {
+                                        error("حجم النموذج بعد فك الضغط أكبر من الحد الآمن (${MAX_EXTRACTED_MODEL_BYTES / (1024 * 1024)} MB).")
+                                    }
+                                    read = zis.read(buffer)
+                                }
+                            }
+                        }
+                        zis.closeEntry()
+                        entry = zis.nextEntry
+                    }
+                }
+            }
+
+            // Flatten single root folder inside zip if present
+            val topChildren = stagingDir.listFiles()?.toList().orEmpty()
+            val candidateRoot = if (containsVoskModelFiles(stagingDir)) {
+                stagingDir
+            } else if (topChildren.size == 1 && topChildren.first().isDirectory && containsVoskModelFiles(topChildren.first())) {
+                topChildren.first()
+            } else {
+                topChildren.firstOrNull { it.isDirectory && containsVoskModelFiles(it) }
+            }
+
+            if (candidateRoot == null || !containsVoskModelFiles(candidateRoot)) {
+                error("الملف المختار ليس نموذج Vosk صالحاً (يجب أن يحتوي على مجلد am/ و conf/ وملف final.mdl).")
+            }
+
+            val destDir = File(modelsBase, cleanBaseName)
+            if (destDir.exists()) {
+                destDir.deleteRecursively()
+            }
+            if (candidateRoot == stagingDir) {
+                if (!stagingDir.renameTo(destDir)) {
+                    stagingDir.copyRecursively(destDir, overwrite = true)
+                    stagingDir.deleteRecursively()
+                }
+            } else {
+                if (!candidateRoot.renameTo(destDir)) {
+                    candidateRoot.copyRecursively(destDir, overwrite = true)
+                }
+                stagingDir.deleteRecursively()
+            }
+
+            // Clear old cached model so the new one loads cleanly
+            unloadCachedModel()
+
+            val finalSize = computeDirectorySize(destDir)
+            val lang = inferLanguageFromName(cleanBaseName)
+            ImportedSttModel(
+                modelDir = destDir.absolutePath,
+                displayName = cleanBaseName,
+                sizeBytes = finalSize,
+                languageTag = lang
+            )
+        }.onFailure {
+            stagingDir.deleteRecursively()
         }
     }
 
-    fun inspectCapability(): OfflineSttStatus {
-        val standardAvail = SpeechRecognizer.isRecognitionAvailable(appContext)
-        val onDeviceAvail = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext)
-        } else {
-            false
+    fun deleteInstalledModels() {
+        unloadCachedModel()
+        val modelsBase = File(appContext.filesDir, MODELS_DIR_NAME)
+        if (modelsBase.exists()) {
+            modelsBase.deleteRecursively()
         }
-        return when {
-            onDeviceAvail -> OfflineSttStatus(
-                isRecognizerAvailable = true,
-                isOnDeviceApiAvailable = true,
-                engineModeLabelAr = "On-Device STT (Android 12+)",
-                statusDetailAr = "التعرف المحلي المباشر (On-Device) متاح. تأكد من تنزيل حزمة العربية (مصر) ar-EG للعمل بدون نت."
-            )
-            standardAvail -> OfflineSttStatus(
-                isRecognizerAvailable = true,
-                isOnDeviceApiAvailable = false,
-                engineModeLabelAr = "System SpeechRecognizer (Prefer Offline)",
-                statusDetailAr = "يستخدم محرك النظام مع طلب الوضع الأوفلاين (EXTRA_PREFER_OFFLINE). إذا لم تتوفر حزمة ar-EG محلياً قد يطلب تنزيلها."
-            )
-            else -> OfflineSttStatus(
-                isRecognizerAvailable = false,
-                isOnDeviceApiAvailable = false,
-                engineModeLabelAr = "غير متوفر على النظام",
-                statusDetailAr = "لا يوجد مزود SpeechRecognizer على الجهاز. يمكنك استخدام الإدخال النصي أو تثبيت حزمة Speech Services."
-            )
+        lastLoadErrorAr = null
+    }
+
+    fun unloadCachedModel() {
+        synchronized(modelLock) {
+            runCatching { activeModel?.close() }
+            activeModel = null
+            activeModelDir = ""
+        }
+    }
+
+    private fun ensureModelLoaded(resolvedDir: File): Result<Model> {
+        synchronized(modelLock) {
+            val path = resolvedDir.absolutePath
+            val existing = activeModel
+            if (existing != null && activeModelDir == path) {
+                lastLoadErrorAr = null
+                return Result.success(existing)
+            }
+
+            // Guard extreme low memory before allocating Vosk native FST/AM graphs
+            val availMb = readAvailableRamMb()
+            if (availMb in 1..110L) {
+                val msg = "الذاكرة المتاحة منخفضة جداً ($availMb ميجا) لتحميل نموذج الكلام."
+                lastLoadErrorAr = msg
+                return Result.failure(IllegalStateException("STT_MODEL_LOAD_FAILED: $msg"))
+            }
+
+            runCatching { existing?.close() }
+            activeModel = null
+            activeModelDir = ""
+
+            return runCatching {
+                LibVosk.setLogLevel(LogLevel.WARNINGS)
+                val loaded = Model(path)
+                activeModel = loaded
+                activeModelDir = path
+                lastLoadErrorAr = null
+                loaded
+            }.onFailure { err ->
+                lastLoadErrorAr = err.message ?: "فشل تحميل نموذج Vosk."
+            }
         }
     }
 
     fun startListening(
-        timeoutMs: Long = 10_000L,
+        timeoutMs: Long = 9_500L,
         onRmsDb: (Float) -> Unit,
         onPartialResult: (String) -> Unit,
         onFinalResult: (String) -> Unit,
@@ -88,13 +296,21 @@ class EgyptianOfflineSttManager(private val context: Context) {
         if (ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
         ) {
-            onError("لازم تدي صلاحية المايكروفون عشان أسمعك.")
+            onError("MIC_PERMISSION_DENIED: إذن الميكروفون غير متاح.")
             return
         }
 
         val sid = sessionSeq.incrementAndGet()
-        mainHandler.post {
-            startListeningOnMainThread(sid, timeoutMs, onRmsDb, onPartialResult, onFinalResult, onError)
+        captureJob?.cancel()
+        captureJob = captureScope.launch {
+            runVoskCaptureSession(
+                sid = sid,
+                timeoutMs = timeoutMs,
+                onRmsDb = onRmsDb,
+                onPartialResult = onPartialResult,
+                onFinalResult = onFinalResult,
+                onError = onError
+            )
         }
     }
 
@@ -124,12 +340,12 @@ class EgyptianOfflineSttManager(private val context: Context) {
                 }
             )
         }
-        // Brief hardware release settle window before AudioRecord resumes on OEM devices
-        delay(200L)
+        delay(180L)
         return result
     }
 
-    private fun startListeningOnMainThread(
+    @SuppressLint("MissingPermission")
+    private fun runVoskCaptureSession(
         sid: Long,
         timeoutMs: Long,
         onRmsDb: (Float) -> Unit,
@@ -138,163 +354,266 @@ class EgyptianOfflineSttManager(private val context: Context) {
         onError: (String) -> Unit
     ) {
         if (sid != sessionSeq.get()) return
-        destroyRecognizerOnMainThread()
-
-        val created = runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext)
-            ) {
-                SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext)
-            } else if (SpeechRecognizer.isRecognitionAvailable(appContext)) {
-                SpeechRecognizer.createSpeechRecognizer(appContext)
-            } else {
-                null
-            }
-        }.getOrNull()
-
-        if (created == null) {
+        val configuredDir = runCatching {
+            kotlinx.coroutines.runBlocking { settingsRepo.currentSettings().sttModelDir }
+        }.getOrDefault("")
+        val resolvedDir = resolveConfiguredModelDir(configuredDir)
+        if (resolvedDir == null) {
             CheetahRuntimeBus.setSttActive(false)
-            onError("محرك التعرف على الكلام المحلي مش متوفر على الجهاز ده. تقدر تكتب الأمر مباشرة.")
+            onError("NO_STT_MODEL: لم يتم تثبيت حزمة نموذج كلام محلي (Vosk).")
             return
         }
 
+        val modelResult = ensureModelLoaded(resolvedDir)
+        val model = modelResult.getOrNull()
+        if (model == null) {
+            CheetahRuntimeBus.setSttActive(false)
+            val errDetail = modelResult.exceptionOrNull()?.message.orEmpty()
+            onError("STT_MODEL_LOAD_FAILED: $errDetail")
+            return
+        }
+
+        var audioRecord: AudioRecord? = null
+        var recognizer: Recognizer? = null
         val delivered = AtomicBoolean(false)
-        val timeoutTask = Runnable {
-            if (sid == sessionSeq.get() && delivered.compareAndSet(false, true)) {
-                destroyRecognizerOnMainThread()
-                onRmsDb(0f)
-                onError("انتهت مهلة الاستماع بدون سماع أمر واضح.")
-            }
-        }
-        timeoutRunnable = timeoutTask
-        mainHandler.postDelayed(timeoutTask, timeoutMs)
 
-        CheetahRuntimeBus.setSttActive(true)
-        recognizer = created
-        created.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) = Unit
-            override fun onBeginningOfSpeech() = Unit
-
-            override fun onRmsChanged(rmsdB: Float) {
-                if (sid != sessionSeq.get()) return
-                val normalized = ((rmsdB + 2f) / 12f).coerceIn(0f, 1f)
-                onRmsDb(normalized)
-            }
-
-            override fun onBufferReceived(buffer: ByteArray?) = Unit
-
-            override fun onEndOfSpeech() {
-                if (sid == sessionSeq.get()) onRmsDb(0f)
-            }
-
-            override fun onError(error: Int) {
-                if (sid != sessionSeq.get() || !delivered.compareAndSet(false, true)) return
-                cancelTimeoutOnMainThread()
-                CheetahRuntimeBus.setSttActive(false)
-                onRmsDb(0f)
-                val msg = when (error) {
-                    SpeechRecognizer.ERROR_NO_MATCH ->
-                        "مافهمتش الكلام كويس، ممكن تعيده بالعامية المصرية؟"
-                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT ->
-                        "ماسمعتش صوتك يا فندم، جرب تاني."
-                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
-                        "محتاج صلاحية المايكروفون."
-                    SpeechRecognizer.ERROR_AUDIO ->
-                        "مشكلة في تسجيل الصوت من المايكروفون."
-                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY ->
-                        "محرك التعرف مشغول لحظياً، جرب تاني."
-                    SpeechRecognizer.ERROR_NETWORK,
-                    SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
-                    SpeechRecognizer.ERROR_SERVER ->
-                        "حزمة التعرف الأوفلاين للعامية المصرية (ar-EG) مش محمّلة على الجهاز. نزل حزمة اللغة أوفلاين من إعدادات النظام أو اكتب الأمر."
-                    SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED,
-                    SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
-                        "لغة ar-EG مش متوفرة أوفلاين حالياً على الجهاز. تقدر تنزلها من إعدادات الصوت."
-                    else ->
-                        "حصل خطأ في التعرف المحلي على الصوت (كود $error)."
+        try {
+            recognizer = Recognizer(model, SAMPLE_RATE_HZ.toFloat())
+            val minBuf = AudioRecord.getMinBufferSize(
+                SAMPLE_RATE_HZ,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            )
+            if (minBuf <= 0) {
+                if (delivered.compareAndSet(false, true)) {
+                    onError("AUDIORECORD_INIT_FAILED: حجم المخزن الصوتي غير مدعوم.")
                 }
-                destroyRecognizerOnMainThread()
-                onError(msg)
+                return
+            }
+            val bufferBytes = maxOf(minBuf * 2, FRAME_SAMPLES * 4)
+
+            audioRecord = openAudioRecord(bufferBytes)
+            if (audioRecord == null || audioRecord.state != AudioRecord.STATE_INITIALIZED) {
+                if (delivered.compareAndSet(false, true)) {
+                    onError("AUDIORECORD_INIT_FAILED: تعذر تهيئة الميكروفون.")
+                }
+                return
             }
 
-            override fun onResults(results: Bundle?) {
-                if (sid != sessionSeq.get() || !delivered.compareAndSet(false, true)) return
-                cancelTimeoutOnMainThread()
-                CheetahRuntimeBus.setSttActive(false)
-                onRmsDb(0f)
-                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                val best = matches?.firstOrNull()?.trim().orEmpty()
-                destroyRecognizerOnMainThread()
-                if (best.isEmpty()) {
-                    onError("ماسمعتش أمر واضح.")
+            CheetahRuntimeBus.setSttActive(true)
+            audioRecord.startRecording()
+            if (audioRecord.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                if (delivered.compareAndSet(false, true)) {
+                    onError("BACKGROUND_MIC_BLOCKED: النظام منع بدء التسجيل الصوتي.")
+                }
+                return
+            }
+
+            val pcmChunk = ShortArray(FRAME_SAMPLES)
+            val sessionStart = System.currentTimeMillis()
+            var heardSpeech = false
+            var silenceMs = 0L
+            var noiseBaseline = 0.014f
+            var baselineFrames = 0
+            var zeroOnlyFrames = 0
+            var totalFrames = 0
+            var lastPartial = ""
+
+            while (sid == sessionSeq.get() && captureScope.isActive) {
+                val now = System.currentTimeMillis()
+                if (now - sessionStart >= timeoutMs) break
+
+                val read = audioRecord.read(pcmChunk, 0, pcmChunk.size)
+                if (read < 0) {
+                    if (delivered.compareAndSet(false, true)) {
+                        onError("AUDIORECORD_READ_ERROR: خطأ قراءة المايك ($read).")
+                    }
+                    return
+                }
+                if (read == 0) {
+                    Thread.sleep(15L)
+                    continue
+                }
+
+                totalFrames++
+                val rms = computeRms(pcmChunk, read)
+                if (rms < 1e-5f) {
+                    zeroOnlyFrames++
                 } else {
-                    onFinalResult(best)
+                    zeroOnlyFrames = 0
+                }
+                if (totalFrames >= 14 && zeroOnlyFrames >= 14) {
+                    if (delivered.compareAndSet(false, true)) {
+                        onError("AUDIO_SILENCED: الميكروفون مكتوم من النظام أثناء التواجد بالخلفية.")
+                    }
+                    return
+                }
+
+                val rmsNorm = ((rms * 7.5f)).coerceIn(0f, 1f)
+                onRmsDb(rmsNorm)
+
+                if (baselineFrames < 3) {
+                    noiseBaseline = ((noiseBaseline * baselineFrames) + rms) / (baselineFrames + 1)
+                    baselineFrames++
+                }
+                val speechThresh = maxOf(0.018f, noiseBaseline * 2.6f)
+
+                val chunkAccepted = recognizer.acceptWaveForm(pcmChunk, read)
+                val chunkPartial = extractJsonText(recognizer.partialResult, "partial")
+                if (chunkPartial.isNotEmpty() && chunkPartial != lastPartial) {
+                    lastPartial = chunkPartial
+                    onPartialResult(chunkPartial)
+                }
+
+                val isSpeechFrame = rms >= speechThresh || chunkPartial.isNotEmpty()
+                val chunkMs = ((read * 1000L) / SAMPLE_RATE_HZ).coerceAtLeast(20L)
+
+                if (isSpeechFrame) {
+                    heardSpeech = true
+                    silenceMs = 0L
+                } else if (heardSpeech) {
+                    silenceMs += chunkMs
+                    if (silenceMs >= ENDPOINT_SILENCE_MS || (chunkAccepted && lastPartial.isNotEmpty())) {
+                        break
+                    }
                 }
             }
 
-            override fun onPartialResults(partialResults: Bundle?) {
-                if (sid != sessionSeq.get()) return
-                val partial = partialResults
-                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()
-                    ?.trim()
-                    .orEmpty()
-                if (partial.isNotEmpty()) {
-                    onPartialResult(partial)
+            if (sid != sessionSeq.get()) return
+
+            val finalText = extractJsonText(recognizer.finalResult, "text").ifBlank { lastPartial }.trim()
+            if (delivered.compareAndSet(false, true)) {
+                if (finalText.isBlank()) {
+                    onError("NO_SPEECH: لم يتم التقاط كلام واضح.")
+                } else {
+                    onFinalResult(finalText)
                 }
             }
-
-            override fun onEvent(eventType: Int, params: Bundle?) = Unit
-        })
-
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ar-EG")
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "ar-EG")
-            putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, "ar-EG")
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1400L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1100L)
-        }
-
-        runCatching {
-            created.startListening(intent)
-        }.onFailure {
-            if (sid == sessionSeq.get() && delivered.compareAndSet(false, true)) {
-                cancelTimeoutOnMainThread()
-                CheetahRuntimeBus.setSttActive(false)
-                destroyRecognizerOnMainThread()
-                onError("تعذر تشغيل المايكروفون للتعرف على الكلام.")
+        } catch (se: SecurityException) {
+            if (delivered.compareAndSet(false, true)) {
+                onError("MIC_PERMISSION_DENIED: ${se.message ?: "SecurityException"}")
             }
+        } catch (t: Throwable) {
+            if (delivered.compareAndSet(false, true)) {
+                onError("AUDIORECORD_HARDWARE: ${t.message ?: t.javaClass.simpleName}")
+            }
+        } finally {
+            onRmsDb(0f)
+            CheetahRuntimeBus.setSttActive(false)
+            runCatching {
+                if (audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                    audioRecord.stop()
+                }
+            }
+            runCatching { audioRecord?.release() }
+            runCatching { recognizer?.close() }
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun openAudioRecord(bufferBytes: Int): AudioRecord? {
+        val sources = intArrayOf(
+            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            MediaRecorder.AudioSource.MIC
+        )
+        for (source in sources) {
+            val candidate = runCatching {
+                AudioRecord(
+                    source,
+                    SAMPLE_RATE_HZ,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    bufferBytes
+                )
+            }.getOrNull()
+            if (candidate != null && candidate.state == AudioRecord.STATE_INITIALIZED) {
+                return candidate
+            }
+            runCatching { candidate?.release() }
+        }
+        return null
     }
 
     fun stopAndRelease() {
         sessionSeq.incrementAndGet()
+        captureJob?.cancel()
+        captureJob = null
         CheetahRuntimeBus.setSttActive(false)
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            destroyRecognizerOnMainThread()
-        } else {
-            mainHandler.post { destroyRecognizerOnMainThread() }
+    }
+
+    private fun computeRms(samples: ShortArray, count: Int): Float {
+        if (count <= 0) return 0f
+        var sumSq = 0.0
+        for (i in 0 until count) {
+            val norm = samples[i] / 32768.0
+            sumSq += norm * norm
         }
+        return sqrt(sumSq / count).toFloat()
     }
 
-    private fun cancelTimeoutOnMainThread() {
-        timeoutRunnable?.let { mainHandler.removeCallbacks(it) }
-        timeoutRunnable = null
+    private fun extractJsonText(json: String?, key: String): String {
+        if (json.isNullOrBlank()) return ""
+        return runCatching {
+            JSONObject(json).optString(key, "").trim()
+        }.getOrDefault("")
     }
 
-    private fun destroyRecognizerOnMainThread() {
-        cancelTimeoutOnMainThread()
-        CheetahRuntimeBus.setSttActive(false)
-        val rec = recognizer
-        recognizer = null
-        if (rec != null) {
-            runCatching { rec.stopListening() }
-            runCatching { rec.cancel() }
-            runCatching { rec.destroy() }
+    private fun queryDisplayName(uri: Uri): String? {
+        return runCatching {
+            appContext.contentResolver.query(
+                uri,
+                arrayOf(OpenableColumns.DISPLAY_NAME),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (idx >= 0) cursor.getString(idx) else null
+                } else null
+            }
+        }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/')
+    }
+
+    private fun readAvailableRamMb(): Long {
+        return runCatching {
+            val am = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+                ?: return -1L
+            val mi = ActivityManager.MemoryInfo()
+            am.getMemoryInfo(mi)
+            mi.availMem / (1024L * 1024L)
+        }.getOrDefault(-1L)
+    }
+
+    private fun computeDirectorySize(dir: File): Long {
+        if (!dir.exists()) return 0L
+        if (dir.isFile) return dir.length()
+        return dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+    }
+
+    companion object {
+        const val SAMPLE_RATE_HZ = 16_000
+        private const val FRAME_SAMPLES = 1600 // 100ms chunks
+        private const val ENDPOINT_SILENCE_MS = 1250L
+        private const val MODELS_DIR_NAME = "stt_models"
+        private const val MAX_EXTRACTED_MODEL_BYTES = 1_500L * 1024L * 1024L // 1.5 GB zip bomb cap
+
+        fun containsVoskModelFiles(dir: File): Boolean {
+            if (!dir.exists() || !dir.isDirectory) return false
+            val hasAcousticModel = File(dir, "am/final.mdl").isFile || File(dir, "final.mdl").isFile
+            val hasSupportDir = File(dir, "conf").isDirectory ||
+                File(dir, "graph").isDirectory ||
+                File(dir, "ivector").isDirectory
+            return hasAcousticModel && hasSupportDir
+        }
+
+        fun inferLanguageFromName(name: String): String {
+            val lower = name.lowercase(Locale.US)
+            return when {
+                lower.contains("-ar") || lower.contains("arabic") || lower.contains("_ar") -> "ar"
+                lower.contains("-en") || lower.contains("english") || lower.contains("_en") -> "en"
+                else -> "multi"
+            }
         }
     }
 }

@@ -178,19 +178,19 @@ fun AboutScreen(
                     accent = CheetahEmerald
                 ) {
                     Text(
-                        text = "• لا يحتوي التطبيق على أي مفاتيح API ولا أي ذكاء اصطناعي سحابي ولا يتتبع المستخدم.",
+                        text = "• لا يحتوي التطبيق على أي مفاتيح API ولا أي ذكاء اصطناعي سحابي، ولا يعتمد على خدمات جوجل في التعرف على الكلام (يستخدم Vosk أوفلاين + MFCC-DTW + llama.cpp محلياً).",
                         style = MaterialTheme.typography.bodySmall,
                         color = CheetahTextPrimary
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "• حالة البحث على الإنترنت مقفولة افتراضياً. عند تفعيلها يدوياً فقط، يتم إرسال نص استعلام البحث عبر HTTPS إلى المحركات المختارة بدون مفاتيح (DuckDuckGo / Wikipedia / Mojeek / SearXNG المخصص)، وعند تفعيل جلب المقتطفات تُقرأ نصوص مختصرة من الصفحات الأعلى ترتيباً لتقييمها محلياً.",
+                        text = "• البحث على الإنترنت مفعّل افتراضياً للاستفسارات العامة بدون أي مفاتيح API (DuckDuckGo / Wikipedia / Mojeek / SearXNG المخصص)، ولا يخرج من الجهاز سوى نص استعلام البحث فقط (ومقتطفات <= 120 KB عند تفعيلها) وبإمكانك إغلاقه من الإعدادات ليصبح التطبيق أوفلاين 100%.",
                         style = MaterialTheme.typography.bodySmall,
                         color = CheetahTextSecondary
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "• No cloud AI APIs, no bundled LLM weights, no hidden telemetry, and no keys. Your GGUF models, voice templates, and chat memory stay on your device.",
+                        text = "• No cloud AI APIs, no bundled Google SpeechRecognizer, no bundled LLM weights, and no hidden telemetry. Audio, GGUF models, voice templates, and memory remain on your device.",
                         style = MaterialTheme.typography.bodySmall,
                         color = CheetahTextSecondary
                     )

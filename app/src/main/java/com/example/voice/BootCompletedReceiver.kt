@@ -53,10 +53,7 @@ class BootCompletedReceiver : BroadcastReceiver() {
                     // Android 14+ prohibits starting microphone FGS from BOOT_COMPLETED
                     postResumeNotification(appContext)
                 } else {
-                    val started = runCatching {
-                        WakeWordDetectionService.start(appContext)
-                        true
-                    }.getOrDefault(false)
+                    val started = WakeWordDetectionService.start(appContext)
                     if (!started) {
                         postResumeNotification(appContext)
                     }

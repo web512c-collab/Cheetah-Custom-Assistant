@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Optional release tag (e.g. v0.5.0) to create or update a GitHub Release and attach the APK'
+        description: 'Optional release tag (e.g. v0.5.1) to create or update a GitHub Release and attach the APK'
         required: false
         type: string
 
@@ -57,10 +57,8 @@ jobs:
             if [ -f debug.keystore.base64 ]; then
               base64 -d debug.keystore.base64 > debug.keystore
             else
-              keytool -genkeypair -v -keystore debug.keystore \
-                -storepass android -alias androiddebugkey -keypass android \
-                -keyalg RSA -keysize 2048 -validity 10000 \
-                -dname "CN=Android Debug,O=Android,C=US"
+              echo "::error::Both debug.keystore and debug.keystore.base64 are missing. Refusing to generate a mismatched keystore."
+              exit 1
             fi
           fi
 
@@ -92,7 +90,7 @@ jobs:
           echo "VERSION_TAG=$VERSION_TAG" >> "$GITHUB_ENV"
 
       - name: Run core JVM unit tests
-        run: ./gradlew :app:testDebugUnitTest --tests "com.example.CheetahCoreUnitTest" --tests "com.example.WakeWordBinaryModelTest" --tests "com.example.WakeStateMachineUnitTest" --tests "com.example.V030FeaturesUnitTest" --tests "com.example.V040AiBrainUnitTest" --tests "com.example.V041SearchEnginesUnitTest" --tests "com.example.V050SheetaFeaturesUnitTest" --no-daemon
+        run: ./gradlew :app:testDebugUnitTest --tests "com.example.CheetahCoreUnitTest" --tests "com.example.WakeWordBinaryModelTest" --tests "com.example.WakeStateMachineUnitTest" --tests "com.example.V030FeaturesUnitTest" --tests "com.example.V040AiBrainUnitTest" --tests "com.example.V041SearchEnginesUnitTest" --tests "com.example.V050SheetaFeaturesUnitTest" --tests "com.example.V051RepairAndVoiceUnitTest" --tests "com.example.StaticNetworkBoundaryTest" --no-daemon
 
       - name: Run Robolectric smoke test (non-blocking)
         continue-on-error: true

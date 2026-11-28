@@ -68,8 +68,8 @@ data class WakeDiagnosticSnapshot(
     val audioSourceUsed: String = "NONE",
     val sampleRateHz: Int = 16000,
     val wakeEngineStatus: String = "UNINITIALIZED",
-    val modelStatus: String = "CHKW-v1 ('يا شيتا') + 0/3 MFCC",
-    val detectionThreshold: Float = 0.58f,
+    val modelStatus: String = "0/5 MFCC-DTW (نموذج CHKW-v1 مساعد)",
+    val detectionThreshold: Float = 0.62f,
     val lastConfidence: Float? = null,
     val lastVoiceMatchScore: Float? = null,
     val lastVoiceMatchResult: String = "N/A",
@@ -345,7 +345,7 @@ data class AssistantSettings(
     val wakePhrase: String = "يا شيتا",
     val wakeSetupMode: WakeWordSetupMode = WakeWordSetupMode.TEXT_TYPED,
     val wakeSensitivity: Float = 0.65f,
-    val voiceMatchEnabled: Boolean = true,
+    val voiceMatchEnabled: Boolean = false,
     val voiceMatchThreshold: Float = 0.68f,
     val allowOwnerFallbackOnLowVoiceMatch: Boolean = true,
     val wakeAckPhrase: String = "أيوه، معاك",
@@ -355,17 +355,19 @@ data class AssistantSettings(
     val continuousListeningEnabled: Boolean = false,
     val isListeningMuted: Boolean = false,
     val allowAccessibilityAutomation: Boolean = false,
-    val requireVoiceMatchForSensitive: Boolean = true,
+    val requireVoiceMatchForSensitive: Boolean = false,
     val openDialerInsteadOfDirectCall: Boolean = true,
-    // Per-feature permission toggles
-    val micFeatureEnabled: Boolean = false,
-    val notificationsFeatureEnabled: Boolean = false,
-    val batteryExemptionFeatureEnabled: Boolean = false,
-    val accessibilityFeatureEnabled: Boolean = false,
+    // OS single-truth permission prompt history
     val micPermissionRequestedOnce: Boolean = false,
     val notifPermissionRequestedOnce: Boolean = false,
-    // Optional keyless HTTPS search (Part 5 multi-engine parallel search) - OFF by default
-    val internetSearchEnabled: Boolean = false,
+    val autoRevokeTipDismissed: Boolean = false,
+    // Local offline Vosk STT model (imported via SAF, zero bundled Google/network STT)
+    val sttModelDir: String = "",
+    val sttModelName: String = "",
+    val sttModelSizeBytes: Long = 0L,
+    val sttModelLanguage: String = "ar",
+    // Keyless HTTPS search (ON by default; sends ONLY cleaned search queries when triggered)
+    val internetSearchEnabled: Boolean = true,
     val searchEngineMode: SearchEngineMode = SearchEngineMode.DUCKDUCKGO,
     val autoSearchOrder: List<ConcreteSearchEngine> = DEFAULT_AUTO_ENGINE_ORDER,
     val enabledSearchEngines: Set<ConcreteSearchEngine> = DEFAULT_ENABLED_SEARCH_ENGINES,
@@ -413,7 +415,8 @@ data class PermissionHealthState(
     val hasNotificationPermission: Boolean = true,
     val isDefaultAssistant: Boolean = false,
     val isAccessibilityEnabled: Boolean = false,
-    val isBatteryOptimizationIgnored: Boolean = false
+    val isBatteryOptimizationIgnored: Boolean = false,
+    val isAutoRevokeExempted: Boolean = true
 ) {
     val readinessScore: Int
         get() {

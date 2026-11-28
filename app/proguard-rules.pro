@@ -7,3 +7,6 @@
 -keep class com.example.voice.WakeWatchdogReceiver { *; }
 -keep class com.example.llm.LlamaNativeBridge { *; }
 -keep interface com.example.llm.LlamaTokenCallback { *; }
+-keep class org.vosk.** { *; }
+-keep class com.sun.jna.** { *; }
+-dontwarn com.sun.jna.**

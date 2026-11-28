@@ -12,14 +12,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Shortcut
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RestartAlt
-import androidx.compose.material.icons.filled.Shortcut
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -58,6 +60,7 @@ import com.example.ui.theme.CheetahEmerald
 import com.example.ui.theme.CheetahObsidian
 import com.example.ui.theme.CheetahTextPrimary
 import com.example.ui.theme.CheetahTextSecondary
+import com.example.ui.viewmodel.DiagnosticSelfTestState
 import com.example.voice.OfflineSttStatus
 import com.example.voice.TtsStatus
 import java.text.SimpleDateFormat
@@ -88,24 +91,24 @@ fun LocalEngineStatusCard(
             Spacer(modifier = Modifier.height(10.dp))
 
             EngineStatusRow(
-                label = "التعرف المحلي (STT ar-EG)",
+                label = "التعرف المحلي (Vosk Offline STT)",
                 value = offlineSttStatus.engineModeLabelAr,
                 detail = offlineSttStatus.statusDetailAr,
-                ok = offlineSttStatus.isOnDeviceApiAvailable
+                ok = offlineSttStatus.hasModelConfigured
             )
             HorizontalDivider(color = CheetahBorder, modifier = Modifier.padding(vertical = 8.dp))
             EngineStatusRow(
                 label = "صوت الرد الأوفلاين (TTS)",
                 value = if (ttsStatus.hasOfflineVoice) "أوفلاين جاهز (${ttsStatus.activeLocaleTag})" else ttsStatus.activeLocaleTag,
                 detail = ttsStatus.statusDetailAr,
-                ok = ttsStatus.hasEgyptianVoice && ttsStatus.hasOfflineVoice
+                ok = ttsStatus.hasEgyptianVoice && ttsStatus.hasOfflineVoice && !ttsStatus.isGoogleTtsEngine
             )
             HorizontalDivider(color = CheetahBorder, modifier = Modifier.padding(vertical = 8.dp))
             EngineStatusRow(
                 label = "محرك كلمة التنبيه المحلي",
                 value = diagnostics.modelStatus,
-                detail = "نموذج ثنائي مدمج CHKW-v1 لكلمة «يا شيتا» (Int8 عبر MappedByteBuffer) + بصمات MFCC-DTW محلية 16kHz بدون إنترنت.",
-                ok = diagnostics.modelStatus.contains("CHKW") || !diagnostics.modelStatus.startsWith("0/")
+                detail = "عينات MFCC-DTW بصوتك هي الأساسية (5 عينات معايرة)، والنموذج المدمج CHKW-v1 يعمل كمعامل مساعد ضعيف فقط (≤10%).",
+                ok = !diagnostics.modelStatus.startsWith("0/")
             )
         }
     }
@@ -157,6 +160,8 @@ fun WakeDiagnosticConsoleCard(
     transitionLog: List<TransitionLogEntry>,
     liveMicLevel: Float,
     serviceRunning: Boolean,
+    selfTestState: DiagnosticSelfTestState = DiagnosticSelfTestState(),
+    onRunThreeStageSelfTest: () -> Unit = {},
     onRunMicDiagnosticTest: () -> Unit,
     onMarkFalseActivation: () -> Unit,
     onResetCounters: () -> Unit,
@@ -239,6 +244,44 @@ fun WakeDiagnosticConsoleCard(
                 )
             }
 
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // 3-Stage Diagnostic Self-Test Panel
+            Surface(
+                color = CheetahDeepNavy,
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.dp, CheetahBorder)
+            ) {
+                Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "اختبار ذاتي من 3 مراحل (Self-Test)",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = CheetahCyan
+                    )
+                    SelfTestStageRow("1. كتابة وأمر محلي", selfTestState.stage1Passed, selfTestState.stage1Label)
+                    SelfTestStageRow("2. التحدث مباشرة (Talk STT)", selfTestState.stage2Passed, selfTestState.stage2Label)
+                    SelfTestStageRow("3. كلمة التنبيه (Wake Word)", selfTestState.stage3Passed, selfTestState.stage3Label)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Button(
+                        onClick = onRunThreeStageSelfTest,
+                        enabled = !selfTestState.isRunning,
+                        colors = ButtonDefaults.buttonColors(containerColor = CheetahAmber),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("settings_diag_self_test_btn")
+                    ) {
+                        Icon(Icons.Default.PlayArrow, contentDescription = null, tint = CheetahObsidian)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (selfTestState.isRunning) "جاري الفحص الذاتي..." else "تشغيل الفحص الذاتي الشامل",
+                            color = CheetahObsidian,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
             Spacer(modifier = Modifier.height(8.dp))
 
             Row(
@@ -316,6 +359,28 @@ fun WakeDiagnosticConsoleCard(
 }
 
 @Composable
+private fun SelfTestStageRow(title: String, passed: Boolean?, detail: String) {
+    Row(verticalAlignment = Alignment.Top, modifier = Modifier.fillMaxWidth()) {
+        val icon = when (passed) {
+            true -> Icons.Default.CheckCircle
+            false -> Icons.Default.ErrorOutline
+            null -> Icons.Default.Memory
+        }
+        val tint = when (passed) {
+            true -> CheetahEmerald
+            false -> CheetahCrimson
+            null -> CheetahTextSecondary
+        }
+        Icon(imageVector = icon, contentDescription = null, tint = tint, modifier = Modifier.size(16.dp).padding(top = 2.dp))
+        Spacer(modifier = Modifier.width(6.dp))
+        Column {
+            Text(text = title, style = MaterialTheme.typography.labelMedium, color = CheetahTextPrimary)
+            Text(text = detail, style = MaterialTheme.typography.bodySmall, color = tint)
+        }
+    }
+}
+
+@Composable
 private fun DiagnosticKv(label: String, value: String) {
     Row(
         modifier = Modifier
@@ -373,7 +438,7 @@ fun LocalMemoryAndShortcutsCard(
 
             Spacer(modifier = Modifier.height(12.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(imageVector = Icons.Default.Shortcut, contentDescription = null, tint = CheetahAmber, modifier = Modifier.size(18.dp))
+                Icon(imageVector = Icons.AutoMirrored.Filled.Shortcut, contentDescription = null, tint = CheetahAmber, modifier = Modifier.size(18.dp))
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     text = "اختصارات صوتية مخصصة (${memoryState.shortcuts.size})",

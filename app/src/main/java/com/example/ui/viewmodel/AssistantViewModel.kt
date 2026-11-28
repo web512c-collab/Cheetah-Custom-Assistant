@@ -49,10 +49,14 @@ import com.example.voice.CheetahRuntimeBus
 import com.example.voice.EgyptianOfflineSttManager
 import com.example.voice.EgyptianTtsManager
 import com.example.voice.EnrollmentCaptureResult
+import com.example.voice.MappedVoiceError
 import com.example.voice.MicOwner
 import com.example.voice.MicrophoneArbitrator
 import com.example.voice.OfflineSttStatus
 import com.example.voice.TtsStatus
+import com.example.voice.VoiceErrorMapper
+import com.example.voice.WakeCalibrationResult
+import com.example.voice.WakeThresholdCalibrator
 import com.example.voice.WakeWordDetectionService
 import com.example.voice.WakeWordEnrollmentRecorder
 import kotlinx.coroutines.Job
@@ -60,6 +64,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -120,6 +125,34 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private val _searchTestResult = MutableStateFlow<SearchEngineTestResult?>(null)
     val searchTestResult: StateFlow<SearchEngineTestResult?> = _searchTestResult.asStateFlow()
 
+    private val _voiceErrorBanner = MutableStateFlow<MappedVoiceError?>(null)
+    val voiceErrorBanner: StateFlow<MappedVoiceError?> = _voiceErrorBanner.asStateFlow()
+
+    private val _isImportingSttModel = MutableStateFlow(false)
+    val isImportingSttModel: StateFlow<Boolean> = _isImportingSttModel.asStateFlow()
+
+    private val _sttImportFeedbackAr = MutableStateFlow<String?>(null)
+    val sttImportFeedbackAr: StateFlow<String?> = _sttImportFeedbackAr.asStateFlow()
+
+    val wakeCalibration: StateFlow<WakeCalibrationResult> = combine(
+        enrolledSamples,
+        settingsRepo.settingsFlow
+    ) { samples, s ->
+        WakeThresholdCalibrator.calibrate(samples, s.wakeSensitivity)
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5000L),
+        WakeThresholdCalibrator.calibrate(templateStore.samples.value, AssistantSettings().wakeSensitivity)
+    )
+
+    private val _wakeTestState = MutableStateFlow(WakeTestSessionState())
+    val wakeTestState: StateFlow<WakeTestSessionState> = _wakeTestState.asStateFlow()
+
+    private val _selfTestState = MutableStateFlow(DiagnosticSelfTestState())
+    val selfTestState: StateFlow<DiagnosticSelfTestState> = _selfTestState.asStateFlow()
+
+    private var wakeTestStartedService = false
+
     private val _offlineSttStatus = MutableStateFlow(sttManager.inspectCapability())
     val offlineSttStatus: StateFlow<OfflineSttStatus> = _offlineSttStatus.asStateFlow()
 
@@ -152,9 +185,9 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             CheetahRuntimeBus.updateDiagnostics { snap ->
                 snap.copy(
                     modelStatus = if (bundled != null) {
-                        "CHKW-v1 ('يا شيتا', ${bundled.modelSizeBytes}B) + $mfccCount/${VoiceTemplateStore.MAX_SAMPLES} MFCC"
+                        "$mfccCount/${VoiceTemplateStore.MIN_REQUIRED_SAMPLES} MFCC-DTW + CHKW-v1 مساعد (≤10%)"
                     } else {
-                        "$mfccCount/${VoiceTemplateStore.MAX_SAMPLES} MFCC templates"
+                        "$mfccCount/${VoiceTemplateStore.MIN_REQUIRED_SAMPLES} MFCC-DTW"
                     },
                     lastError = bundledRes.exceptionOrNull()?.let { "تعذر تحميل النموذج المدمج: ${it.message}" } ?: snap.lastError
                 )
@@ -162,44 +195,119 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             bundled?.close()
             val initialSettings = settingsRepo.currentSettings()
             localLlmManager.refreshStorageAndMemoryTelemetry(initialSettings.localLlmConfig)
+            _offlineSttStatus.value = sttManager.inspectCapability(
+                configuredDir = initialSettings.sttModelDir,
+                configuredName = initialSettings.sttModelName,
+                configuredSizeBytes = initialSettings.sttModelSizeBytes,
+                configuredLang = initialSettings.sttModelLanguage
+            )
         }
 
-        // Sync TTS voice selection and telemetry cleanly whenever settings change
+        // Sync TTS voice selection, STT model status, and LLM telemetry whenever settings change
         viewModelScope.launch {
             settingsRepo.settingsFlow
                 .distinctUntilChanged()
                 .collect { s ->
                     ttsManager.applyVoicePreferences(s.voiceGender, s.selectedTtsVoiceName)
                     localLlmManager.refreshStorageAndMemoryTelemetry(s.localLlmConfig)
+                    _offlineSttStatus.value = sttManager.inspectCapability(
+                        configuredDir = s.sttModelDir,
+                        configuredName = s.sttModelName,
+                        configuredSizeBytes = s.sttModelSizeBytes,
+                        configuredLang = s.sttModelLanguage
+                    )
                 }
+        }
+
+        // Track 10-say wake word live test session attempts
+        viewModelScope.launch {
+            CheetahRuntimeBus.wakeEvalEvents.collect { eval ->
+                val cur = _wakeTestState.value
+                if (!cur.isActive) return@collect
+                val nextAttempts = cur.attempts + 1
+                val nextHits = cur.hits + if (eval.detected) 1 else 0
+                val finished = nextAttempts >= cur.targetCount
+                val summary = if (finished) {
+                    val threshPct = (eval.threshold * 100).toInt()
+                    if (nextHits >= 8) {
+                        "نتيجة ممتازة ($nextHits/${cur.targetCount}) على عتبة $threshPct%."
+                    } else {
+                        "تم رصد $nextHits من ${cur.targetCount} محاولات على عتبة $threshPct% — جرّب رفع الحساسية أو إعادة تسجيل العينات الضعيفة."
+                    }
+                } else null
+
+                _wakeTestState.value = cur.copy(
+                    isActive = !finished,
+                    attempts = nextAttempts,
+                    hits = nextHits,
+                    lastConfidence = eval.confidence,
+                    lastThreshold = eval.threshold,
+                    lastSource = eval.source,
+                    summaryAr = summary
+                )
+                if (finished) {
+                    WakeWordDetectionService.cancelDiagnosticTest(appContext)
+                    if (wakeTestStartedService && !settings.value.continuousListeningEnabled) {
+                        WakeWordDetectionService.stop(appContext)
+                    }
+                    wakeTestStartedService = false
+                }
+            }
         }
     }
 
     fun refreshPermissions() {
         val inspected = PermissionHealthChecker.inspect(appContext)
         _permissionHealth.value = inspected
-        _offlineSttStatus.value = sttManager.inspectCapability()
-        localLlmManager.refreshStorageAndMemoryTelemetry(settings.value.localLlmConfig)
-        viewModelScope.launch {
-            settingsRepo.setPermissionFeatureState(
-                batteryEnabled = inspected.isBatteryOptimizationIgnored,
-                accessibilityEnabled = inspected.isAccessibilityEnabled
-            )
+        val s = settings.value
+        _offlineSttStatus.value = sttManager.inspectCapability(
+            configuredDir = s.sttModelDir,
+            configuredName = s.sttModelName,
+            configuredSizeBytes = s.sttModelSizeBytes,
+            configuredLang = s.sttModelLanguage
+        )
+        localLlmManager.refreshStorageAndMemoryTelemetry(s.localLlmConfig)
+        if (!inspected.hasMicPermission && serviceRunning.value) {
+            WakeWordDetectionService.stop(appContext)
+            viewModelScope.launch { settingsRepo.setContinuousListening(false) }
         }
+    }
+
+    fun dismissVoiceError() {
+        _voiceErrorBanner.value = null
     }
 
     fun startVoiceCommand() {
         refreshPermissions()
-        if (!_permissionHealth.value.hasMicPermission) {
+        val hasMic = _permissionHealth.value.hasMicPermission
+        val hasModel = sttManager.isOnDeviceSupported()
+        if (!hasMic) {
+            val mapped = VoiceErrorMapper.mapFailure(
+                rawReason = "MIC_PERMISSION_DENIED",
+                hasMicPermission = false,
+                hasLocalSttModel = hasModel
+            )
+            _voiceErrorBanner.value = mapped
             CheetahRuntimeBus.updatePipelineState(AssistantPipelineState.ERROR)
-            _partialTranscript.value = "صلاحية المايكروفون غير مفعلة — فعّلها من الإعدادات."
+            _partialTranscript.value = mapped.messageAr
+            return
+        }
+        if (!hasModel) {
+            val mapped = VoiceErrorMapper.mapFailure(
+                rawReason = "NO_STT_MODEL",
+                hasMicPermission = true,
+                hasLocalSttModel = false
+            )
+            _voiceErrorBanner.value = mapped
+            _partialTranscript.value = mapped.messageAr
             return
         }
         if (activeVoiceJob?.isActive == true) return
 
+        _voiceErrorBanner.value = null
         activeVoiceJob = viewModelScope.launch {
             CheetahRuntimeBus.updatePipelineState(AssistantPipelineState.LISTENING_COMMAND)
-            _partialTranscript.value = "سامعك بالعامية المصرية..."
+            _partialTranscript.value = "سامعك بالعامية المصرية (Vosk أوفلاين)..."
             val sttResult = MicrophoneArbitrator.withMicAccess(MicOwner.UI_PTT_STT) {
                 sttManager.listenOnce(
                     timeoutMs = 10_000L,
@@ -209,11 +317,18 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             }
             sttResult.fold(
                 onSuccess = { finalText ->
+                    _voiceErrorBanner.value = null
                     _partialTranscript.value = finalText
                     processCommand(finalText, voiceMatchPassed = true)
                 },
                 onFailure = { err ->
-                    _partialTranscript.value = err.message ?: "تعذر سماع الأمر"
+                    val mapped = VoiceErrorMapper.mapFailure(
+                        rawReason = err.message,
+                        hasMicPermission = _permissionHealth.value.hasMicPermission,
+                        hasLocalSttModel = sttManager.isOnDeviceSupported()
+                    )
+                    _voiceErrorBanner.value = mapped
+                    _partialTranscript.value = mapped.messageAr
                     CheetahRuntimeBus.updatePipelineState(
                         if (serviceRunning.value) AssistantPipelineState.LISTENING_WAKE_WORD
                         else AssistantPipelineState.IDLE
@@ -420,11 +535,22 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 _enrollmentFeedbackAr.value = "مطلوب صلاحية المايكروفون لتشغيل الاستماع المستمر."
                 return@launch
             }
-            settingsRepo.setContinuousListening(enable)
             if (enable) {
-                settingsRepo.setPermissionFeatureState(micEnabled = true)
-                WakeWordDetectionService.start(appContext)
+                val samplesCount = templateStore.samples.value.count { it.mfccSequence.isNotEmpty() }
+                if (settings.value.wakeSetupMode != WakeWordSetupMode.TEXT_TYPED &&
+                    samplesCount < VoiceTemplateStore.MIN_REQUIRED_SAMPLES
+                ) {
+                    _enrollmentFeedbackAr.value = "تنبيه: مسجل حالياً $samplesCount/${VoiceTemplateStore.MIN_REQUIRED_SAMPLES} عينات — يُفضل إكمال ${VoiceTemplateStore.MIN_REQUIRED_SAMPLES} عينات لثبات الكشف."
+                }
+                val started = WakeWordDetectionService.start(appContext)
+                if (started) {
+                    settingsRepo.setContinuousListening(true)
+                } else {
+                    settingsRepo.setContinuousListening(false)
+                    _enrollmentFeedbackAr.value = "نظام أندرويد منع بدء خدمة الخلفية حالياً — تأكد من استثناء البطارية أو افتح الشاشة وأعد المحاولة."
+                }
             } else {
+                settingsRepo.setContinuousListening(false)
                 WakeWordDetectionService.stop(appContext)
             }
         }
@@ -440,32 +566,64 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    // Bug A3: Persisted switch state management (never re-prompts already granted permissions)
-    fun setMicFeatureEnabled(enabled: Boolean) {
-        viewModelScope.launch {
-            settingsRepo.setPermissionFeatureState(micEnabled = enabled)
-            if (!enabled) {
-                settingsRepo.setContinuousListening(false)
-                WakeWordDetectionService.stop(appContext)
-            }
-        }
-    }
-
     fun markMicPermissionRequestedOnce() {
         viewModelScope.launch {
-            settingsRepo.setPermissionFeatureState(micAskedOnce = true)
-        }
-    }
-
-    fun setNotificationsFeatureEnabled(enabled: Boolean) {
-        viewModelScope.launch {
-            settingsRepo.setPermissionFeatureState(notifEnabled = enabled)
+            settingsRepo.setPermissionAskedOnce(micAskedOnce = true)
         }
     }
 
     fun markNotifPermissionRequestedOnce() {
         viewModelScope.launch {
-            settingsRepo.setPermissionFeatureState(notifAskedOnce = true)
+            settingsRepo.setPermissionAskedOnce(notifAskedOnce = true)
+        }
+    }
+
+    fun dismissAutoRevokeTip() {
+        viewModelScope.launch {
+            settingsRepo.dismissAutoRevokeTip()
+        }
+    }
+
+    fun importSttModelZip(uri: Uri) {
+        if (_isImportingSttModel.value) return
+        viewModelScope.launch {
+            _isImportingSttModel.value = true
+            _sttImportFeedbackAr.value = "جاري فك ضغط والتحقق من نموذج الكلام (Vosk)..."
+            try {
+                val res = sttManager.importModelFromUri(uri)
+                res.fold(
+                    onSuccess = { imported ->
+                        settingsRepo.updateLocalSttModel(
+                            modelDir = imported.modelDir,
+                            displayName = imported.displayName,
+                            sizeBytes = imported.sizeBytes,
+                            languageTag = imported.languageTag
+                        )
+                        _offlineSttStatus.value = sttManager.inspectCapability(
+                            configuredDir = imported.modelDir,
+                            configuredName = imported.displayName,
+                            configuredSizeBytes = imported.sizeBytes,
+                            configuredLang = imported.languageTag
+                        )
+                        _sttImportFeedbackAr.value = "تم تثبيت نموذج «${imported.displayName}» بنجاح للعمل أوفلاين بدون جوجل."
+                        _voiceErrorBanner.value = null
+                    },
+                    onFailure = { err ->
+                        _sttImportFeedbackAr.value = err.message ?: "تعذر استيراد ملف النموذج."
+                    }
+                )
+            } finally {
+                _isImportingSttModel.value = false
+            }
+        }
+    }
+
+    fun removeSttModel() {
+        viewModelScope.launch {
+            sttManager.deleteInstalledModels()
+            settingsRepo.clearLocalSttModel()
+            _offlineSttStatus.value = sttManager.inspectCapability()
+            _sttImportFeedbackAr.value = "تم حذف نموذج الكلام المحلي من ذاكرة التطبيق."
         }
     }
 
@@ -523,8 +681,13 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         WakeWordDetectionService.reloadTemplates(appContext)
                     }
                     val count = templateStore.samples.value.size
-                    _enrollmentFeedbackAr.value =
-                        "تم حفظ نموذج MFCC-DTW + البصمة ($count/${VoiceTemplateStore.MAX_SAMPLES}) لاسم «$targetWakePhrase»."
+                    val cal = templateStore.getCalibratedThreshold(settings.value.wakeSensitivity)
+                    _enrollmentFeedbackAr.value = if (count < VoiceTemplateStore.MIN_REQUIRED_SAMPLES) {
+                        val remaining = VoiceTemplateStore.MIN_REQUIRED_SAMPLES - count
+                        "تم حفظ العينة $count/${VoiceTemplateStore.MIN_REQUIRED_SAMPLES} لـ «$targetWakePhrase» — تبقى $remaining لتثبيت المعايرة."
+                    } else {
+                        "تمت المعايرة! ($count/${VoiceTemplateStore.MAX_SAMPLES} عينات • عتبة DTW ${(cal.threshold * 100).toInt()}%) لاسم «$targetWakePhrase»."
+                    }
                 }
                 is EnrollmentCaptureResult.Error -> {
                     _enrollmentFeedbackAr.value = result.messageAr
@@ -899,13 +1062,150 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         refreshPermissions()
         if (!_permissionHealth.value.hasMicPermission) {
             CheetahRuntimeBus.updateDiagnostics {
-                it.copy(lastError = "امنح صلاحية المايكروفون لتشغيل الاختبار التشخيصي.")
+                it.copy(lastError = "امنح صلاحية المايكروفون من الإعدادات لتشغيل الاختبار التشخيصي.")
             }
             return
         }
         viewModelScope.launch {
             settingsRepo.setContinuousListening(true)
             WakeWordDetectionService.runDiagnosticTest(appContext)
+        }
+    }
+
+    fun startWakeTenSayTest() {
+        refreshPermissions()
+        if (!_permissionHealth.value.hasMicPermission) {
+            _enrollmentFeedbackAr.value = "افتح صلاحية المايكروفون من الإعدادات أولاً لبدء اختبار الـ 10 مرات."
+            return
+        }
+        val cal = wakeCalibration.value
+        wakeTestStartedService = !serviceRunning.value
+        _wakeTestState.value = WakeTestSessionState(
+            isActive = true,
+            targetCount = 10,
+            attempts = 0,
+            hits = 0,
+            lastConfidence = null,
+            lastThreshold = cal.threshold,
+            lastSource = "",
+            summaryAr = "تحدّث وقل «${settings.value.wakePhrase}» 10 مرات بصوت طبيعي..."
+        )
+        val started = WakeWordDetectionService.runDiagnosticTest(appContext, durationMs = 55_000L)
+        if (!started) {
+            _wakeTestState.value = _wakeTestState.value.copy(
+                isActive = false,
+                summaryAr = "تعذر تشغيل خدمة الخلفية للاختبار — تأكد من استثناء البطارية وأعد المحاولة."
+            )
+            wakeTestStartedService = false
+        }
+    }
+
+    fun stopWakeTenSayTest() {
+        val cur = _wakeTestState.value
+        _wakeTestState.value = cur.copy(
+            isActive = false,
+            summaryAr = if (cur.attempts > 0) "توقف الاختبار عند ${cur.hits}/${cur.attempts}." else null
+        )
+        WakeWordDetectionService.cancelDiagnosticTest(appContext)
+        if (wakeTestStartedService && !settings.value.continuousListeningEnabled) {
+            WakeWordDetectionService.stop(appContext)
+        }
+        wakeTestStartedService = false
+    }
+
+    fun runThreeStageSelfTest() {
+        if (_selfTestState.value.isRunning) return
+        viewModelScope.launch {
+            _selfTestState.value = DiagnosticSelfTestState(
+                isRunning = true,
+                stage1Label = "جاري فحص NLU والقواعد...",
+                stage2Label = "في انتظار المرحلة 2...",
+                stage3Label = "في انتظار المرحلة 3..."
+            )
+
+            // Stage 1: Typed NLU + Guardrails + Device Status
+            val s = settingsRepo.currentSettings()
+            val stage1Result = runCatching {
+                val out = commandProcessor.process(
+                    rawInput = "الساعة كام والبطارية كام؟",
+                    settings = s,
+                    voiceMatchPassed = true,
+                    onStopSpeech = {}
+                )
+                !out.isBlocked && out.replyAr.isNotBlank()
+            }.getOrDefault(false)
+            val stage1Text = if (stage1Result) {
+                "نجح (تم تحليل وتنفيذ الأمر المحلي بدون إنترنت)"
+            } else {
+                "فشل تحليل الأمر المحلي"
+            }
+
+            // Stage 2: Offline STT (Talk) readiness & live capture test
+            refreshPermissions()
+            val perms = _permissionHealth.value
+            val sttCap = sttManager.inspectCapability(
+                configuredDir = s.sttModelDir,
+                configuredName = s.sttModelName,
+                configuredSizeBytes = s.sttModelSizeBytes,
+                configuredLang = s.sttModelLanguage
+            )
+            val (stage2Pass, stage2Text) = when {
+                !perms.hasMicPermission -> false to VoiceErrorMapper.mapFailure(
+                    "MIC_PERMISSION",
+                    hasMicPermission = false,
+                    hasLocalSttModel = sttCap.hasModelConfigured
+                ).messageAr
+                !sttCap.hasModelConfigured -> false to VoiceErrorMapper.mapFailure(
+                    "NO_STT_MODEL",
+                    hasMicPermission = true,
+                    hasLocalSttModel = false
+                ).messageAr
+                else -> {
+                    _selfTestState.value = _selfTestState.value.copy(
+                        stage1Passed = stage1Result,
+                        stage1Label = stage1Text,
+                        stage2Label = "تحدّث بأي جملة الآن (5 ثوانٍ) لاختبار Vosk STT..."
+                    )
+                    val res = MicrophoneArbitrator.withMicAccess(MicOwner.UI_PTT_STT) {
+                        sttManager.listenOnce(timeoutMs = 5_000L)
+                    }
+                    res.fold(
+                        onSuccess = { heard -> true to "نجح (سمع: «$heard»)" },
+                        onFailure = { err ->
+                            val mapped = VoiceErrorMapper.mapFailure(
+                                rawReason = err.message,
+                                hasMicPermission = true,
+                                hasLocalSttModel = true
+                            )
+                            false to mapped.messageAr
+                        }
+                    )
+                }
+            }
+
+            // Stage 3: Wake word engine & calibrated template readiness
+            val samples = templateStore.samples.value.count { it.mfccSequence.isNotEmpty() }
+            val cal = WakeThresholdCalibrator.calibrate(templateStore.samples.value, s.wakeSensitivity)
+            val stage3Pass = perms.hasMicPermission && (samples >= VoiceTemplateStore.MIN_REQUIRED_SAMPLES || s.wakeSetupMode == WakeWordSetupMode.TEXT_TYPED)
+            val stage3Text = when {
+                !perms.hasMicPermission -> "فشل: صلاحية المايكروفون غير مفعلة"
+                samples >= VoiceTemplateStore.MIN_REQUIRED_SAMPLES ->
+                    "جاهز ($samples عينات MFCC-DTW • عتبة ${(cal.threshold * 100).toInt()}%)"
+                s.wakeSetupMode == WakeWordSetupMode.TEXT_TYPED ->
+                    "جاهز في الوضع النصي عبر STT المحلي"
+                else ->
+                    "غير مكتمل ($samples/${VoiceTemplateStore.MIN_REQUIRED_SAMPLES} عينات — أكمل تسجيل 5 عينات أو اختبر 10 مرات)"
+            }
+
+            _selfTestState.value = DiagnosticSelfTestState(
+                isRunning = false,
+                stage1Passed = stage1Result,
+                stage1Label = stage1Text,
+                stage2Passed = stage2Pass,
+                stage2Label = stage2Text,
+                stage3Passed = stage3Pass,
+                stage3Label = stage3Text
+            )
         }
     }
 
@@ -930,3 +1230,24 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         super.onCleared()
     }
 }
+
+data class WakeTestSessionState(
+    val isActive: Boolean = false,
+    val targetCount: Int = 10,
+    val attempts: Int = 0,
+    val hits: Int = 0,
+    val lastConfidence: Float? = null,
+    val lastThreshold: Float = 0.62f,
+    val lastSource: String = "",
+    val summaryAr: String? = null
+)
+
+data class DiagnosticSelfTestState(
+    val isRunning: Boolean = false,
+    val stage1Passed: Boolean? = null,
+    val stage1Label: String = "1. اختبار كتابة وأمر محلي (NLU)",
+    val stage2Passed: Boolean? = null,
+    val stage2Label: String = "2. اختبار التحدث المباشر (Vosk Offline STT)",
+    val stage3Passed: Boolean? = null,
+    val stage3Label: String = "3. اختبار جاهزية كلمة التنبيه (Wake Word)"
+)

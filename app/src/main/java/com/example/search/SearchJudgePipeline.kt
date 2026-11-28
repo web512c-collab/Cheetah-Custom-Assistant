@@ -9,7 +9,6 @@ import com.example.core.model.VerifiedSearchAnswer
 import com.example.core.model.WebSearchSource
 import com.example.intelligence.ReasoningOutputParser
 import com.example.intelligence.TaskClassifier
-import java.net.URL
 
 /**
  * Search Result Judging Pipeline (Part 3):
@@ -51,11 +50,7 @@ object SearchJudgePipeline {
         val trustedBoost: Int
     )
 
-    fun extractDomain(url: String): String {
-        return runCatching {
-            URL(url).host.lowercase().removePrefix("www.")
-        }.getOrDefault(url.lowercase().substringAfter("://").substringBefore('/').removePrefix("www."))
-    }
+    fun extractDomain(url: String): String = OnlineSearchManager.extractDomain(url)
 
     fun cleanWebPassage(rawTitle: String, rawSnippet: String): Pair<String?, String> {
         val stripped = OnlineSearchManager.stripHtmlTags(rawSnippet)

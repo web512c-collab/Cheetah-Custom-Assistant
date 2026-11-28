@@ -28,7 +28,8 @@ class SheetaAppRobolectricSmokeTest {
         assertEquals("https://github.com/web512c-collab/sheeta-operations-research", AppLinks.GITHUB_OR_REPO_URL)
 
         val defaultSettings = AssistantSettings()
-        assertFalse(defaultSettings.internetSearchEnabled)
+        assertTrue(defaultSettings.internetSearchEnabled)
+        assertFalse(defaultSettings.voiceMatchEnabled)
         assertEquals("شيتا", defaultSettings.assistantName)
 
         val fullPerms = PermissionHealthState(

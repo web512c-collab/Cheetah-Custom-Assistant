@@ -73,12 +73,17 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentPaste
-import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.TextButton
 import androidx.compose.ui.platform.LocalContext
 import com.example.core.model.AssistantPipelineState
 import com.example.core.model.AssistantSettings
@@ -98,6 +103,8 @@ import com.example.ui.theme.CheetahEmerald
 import com.example.ui.theme.CheetahObsidian
 import com.example.ui.theme.CheetahTextPrimary
 import com.example.ui.theme.CheetahTextSecondary
+import com.example.voice.MappedVoiceError
+import com.example.voice.OfflineSttStatus
 
 private val QUICK_EGYPTIAN_COMMANDS = listOf(
     "افتح يوتيوب وشغل قرآن" to false,
@@ -113,6 +120,8 @@ private val QUICK_EGYPTIAN_COMMANDS = listOf(
 fun ConsoleScreen(
     settings: AssistantSettings,
     permissions: PermissionHealthState,
+    offlineSttStatus: OfflineSttStatus,
+    voiceErrorBanner: MappedVoiceError? = null,
     serviceRunning: Boolean,
     liveMicLevel: Float,
     pipelineState: AssistantPipelineState,
@@ -125,6 +134,7 @@ fun ConsoleScreen(
     pendingContinuationText: String? = null,
     pendingProposedAction: ProposedAction? = null,
     onStartVoiceCommand: () -> Unit,
+    onDismissVoiceError: () -> Unit = {},
     onSubmitTextCommand: (String) -> Unit,
     onSubmitTextWithAttachment: (String, String?) -> Unit = { cmd, _ -> onSubmitTextCommand(cmd) },
     onConsumeSharedText: () -> Unit = {},
@@ -134,7 +144,6 @@ fun ConsoleScreen(
     onContinueSpeech: () -> Unit = {},
     onToggleContinuousListening: (Boolean) -> Unit,
     onToggleMute: () -> Unit,
-    onRequestMicPermission: () -> Unit,
     onCancelLlmGeneration: () -> Unit,
     onOpenSettingsTab: () -> Unit
 ) {
@@ -279,7 +288,7 @@ fun ConsoleScreen(
                                 checked = serviceRunning,
                                 onCheckedChange = { wantEnable ->
                                     if (wantEnable && !permissions.hasMicPermission) {
-                                        onRequestMicPermission()
+                                        onOpenSettingsTab()
                                     } else {
                                         onToggleContinuousListening(wantEnable)
                                     }
@@ -290,6 +299,62 @@ fun ConsoleScreen(
                                 ),
                                 modifier = Modifier.testTag("console_wake_service_switch")
                             )
+                        }
+                    }
+                }
+            }
+
+            if (!permissions.hasMicPermission || !offlineSttStatus.hasModelConfigured || voiceErrorBanner != null) {
+                item {
+                    val bannerColor = if (voiceErrorBanner != null || !permissions.hasMicPermission) {
+                        CheetahCrimson
+                    } else {
+                        CheetahAmber
+                    }
+                    val bannerText = when {
+                        voiceErrorBanner != null -> voiceErrorBanner.messageAr
+                        !permissions.hasMicPermission -> "إذن الميكروفون مش مفعّل — افتح الإعدادات للسماح بالمايك أو استخدم الأوامر الكتابية بالأسفل."
+                        else -> "التحدث المباشر (Talk) محتاج نموذج كلام محلي (Vosk .zip) من الإعدادات — الأوامر الكتابية شغالة فوراً."
+                    }
+                    Surface(
+                        color = bannerColor.copy(alpha = 0.13f),
+                        shape = RoundedCornerShape(16.dp),
+                        border = BorderStroke(1.dp, bannerColor.copy(alpha = 0.55f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("console_voice_notice_banner")
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                    Icon(Icons.Default.ErrorOutline, contentDescription = null, tint = bannerColor, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = bannerText,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = CheetahTextPrimary
+                                    )
+                                }
+                                if (voiceErrorBanner != null) {
+                                    IconButton(onClick = onDismissVoiceError) {
+                                        Icon(Icons.Default.Close, contentDescription = "إخفاء", tint = CheetahTextSecondary)
+                                    }
+                                }
+                            }
+                            if (voiceErrorBanner == null || voiceErrorBanner.suggestSettingsTab) {
+                                TextButton(
+                                    onClick = onOpenSettingsTab,
+                                    modifier = Modifier.testTag("console_notice_open_settings_btn")
+                                ) {
+                                    Icon(Icons.Default.Settings, contentDescription = null, tint = CheetahCyan, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("فتح الإعدادات", color = CheetahCyan, fontWeight = FontWeight.Bold)
+                                }
+                            }
                         }
                     }
                 }
@@ -319,8 +384,8 @@ fun ConsoleScreen(
                             pipelineState = pipelineState,
                             micLevel = liveMicLevel,
                             onClick = {
-                                if (!permissions.hasMicPermission) {
-                                    onRequestMicPermission()
+                                if (!permissions.hasMicPermission || !offlineSttStatus.hasModelConfigured) {
+                                    onStartVoiceCommand() // surfaces mapped notice banner without OS prompt
                                 } else {
                                     onStartVoiceCommand()
                                 }
@@ -380,12 +445,18 @@ fun ConsoleScreen(
                             Button(
                                 onClick = {
                                     if (!permissions.hasMicPermission) {
-                                        onRequestMicPermission()
+                                        onOpenSettingsTab()
                                     } else {
                                         onStartVoiceCommand()
                                     }
                                 },
-                                colors = ButtonDefaults.buttonColors(containerColor = CheetahCyan),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (permissions.hasMicPermission && offlineSttStatus.hasModelConfigured) {
+                                        CheetahCyan
+                                    } else {
+                                        CheetahCardElevated
+                                    }
+                                ),
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(50.dp)
@@ -393,13 +464,25 @@ fun ConsoleScreen(
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Mic,
-                                    contentDescription = "تكلم مع شيتا",
-                                    tint = CheetahObsidian
+                                    contentDescription = "تحدث الآن",
+                                    tint = if (permissions.hasMicPermission && offlineSttStatus.hasModelConfigured) {
+                                        CheetahObsidian
+                                    } else {
+                                        CheetahAmber
+                                    }
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = if (permissions.hasMicPermission) "اتكلم بالمصري" else "امنح المايك",
-                                    color = CheetahObsidian,
+                                    text = when {
+                                        !permissions.hasMicPermission -> "افتح الإعدادات للمايك"
+                                        !offlineSttStatus.hasModelConfigured -> "تحدث (يلزم نموذج Vosk)"
+                                        else -> "تحدث الآن (Talk)"
+                                    },
+                                    color = if (permissions.hasMicPermission && offlineSttStatus.hasModelConfigured) {
+                                        CheetahObsidian
+                                    } else {
+                                        CheetahAmber
+                                    },
                                     fontWeight = FontWeight.Bold
                                 )
                             }

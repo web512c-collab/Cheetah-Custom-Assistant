@@ -478,7 +478,7 @@ object AudioFeatureExtractor {
     }
 
     private fun hzToMel(hz: Float): Float = (2595.0 * log10(1.0 + hz / 700.0)).toFloat()
-    private fun melToHz(mel: Float): Float = (700.0 * (Math.pow(10.0, (mel / 2595.0).toDouble()) - 1.0)).toFloat()
+    private fun melToHz(mel: Float): Float = (700.0 * (Math.pow(10.0, mel / 2595.0) - 1.0)).toFloat()
 
     private fun buildMelFilterbank(): Array<FloatArray> {
         val lowMel = hzToMel(100f)

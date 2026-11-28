@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccessibilityNew
 import androidx.compose.material.icons.filled.Assistant
@@ -27,6 +28,8 @@ import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Hearing
 import androidx.compose.material.icons.filled.Lock
@@ -34,6 +37,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -102,8 +106,11 @@ import com.example.ui.theme.CheetahEmerald
 import com.example.ui.theme.CheetahObsidian
 import com.example.ui.theme.CheetahTextPrimary
 import com.example.ui.theme.CheetahTextSecondary
+import com.example.ui.viewmodel.DiagnosticSelfTestState
+import com.example.ui.viewmodel.WakeTestSessionState
 import com.example.voice.OfflineSttStatus
 import com.example.voice.TtsStatus
+import com.example.voice.WakeCalibrationResult
 import java.util.Locale
 
 private val WAKE_PRESETS = listOf("يا شيتا", "هاي شيتا", "يا كابتن", "ألو نمر")
@@ -113,9 +120,14 @@ fun SettingsScreen(
     settings: AssistantSettings,
     rules: List<EndLineRule>,
     enrolledSamples: List<VoiceTemplateSample>,
+    wakeCalibration: WakeCalibrationResult = WakeCalibrationResult(0.62f, 0f, 0f, 0, false),
+    wakeTestState: WakeTestSessionState = WakeTestSessionState(),
+    selfTestState: DiagnosticSelfTestState = DiagnosticSelfTestState(),
     permissions: PermissionHealthState,
     ttsStatus: TtsStatus,
     offlineSttStatus: OfflineSttStatus,
+    isImportingSttModel: Boolean = false,
+    sttImportFeedbackAr: String? = null,
     diagnostics: WakeDiagnosticSnapshot,
     transitionLog: List<TransitionLogEntry>,
     localLlmStatus: LocalLlmRuntimeStatus,
@@ -137,6 +149,8 @@ fun SettingsScreen(
     onClearVoiceSamples: () -> Unit,
     onUpdateWakeSensitivity: (Float) -> Unit,
     onUpdateVoiceMatch: (Boolean, Float?, Boolean?) -> Unit,
+    onStartWakeTenSayTest: () -> Unit = {},
+    onStopWakeTenSayTest: () -> Unit = {},
     onUpdateWakeAckPhrase: (String) -> Unit,
     onUpdatePersonaTone: (PersonaTone) -> Unit,
     onUpdateTtsTuning: (Float, Float) -> Unit,
@@ -146,10 +160,14 @@ fun SettingsScreen(
     onToggleMute: () -> Unit,
     onToggleMicSwitch: (Boolean) -> Unit,
     onToggleNotificationSwitch: (Boolean) -> Unit,
-    onToggleBatterySwitch: (Boolean) -> Unit,
-    onToggleAccessibilitySwitch: (Boolean) -> Unit,
+    onToggleBatterySwitch: () -> Unit,
+    onToggleAccessibilitySwitch: () -> Unit,
     onOpenAppSettings: () -> Unit,
+    onOpenAutoRevokeSettings: () -> Unit = {},
+    onDismissAutoRevokeTip: () -> Unit = {},
     onRefreshPermissions: () -> Unit,
+    onPickSttModelZip: () -> Unit = {},
+    onRemoveSttModel: () -> Unit = {},
     onPickGgufModel: () -> Unit,
     onLoadGgufModel: () -> Unit,
     onUnloadGgufModel: () -> Unit,
@@ -171,6 +189,7 @@ fun SettingsScreen(
     onToggleFetchPageExcerpts: (Boolean) -> Unit = {},
     onTestSearxngConnection: (String) -> Unit = {},
     onTestSearchEngine: () -> Unit = {},
+    onRunThreeStageSelfTest: () -> Unit = {},
     onRunMicDiagnosticTest: () -> Unit,
     onMarkFalseActivation: () -> Unit,
     onResetDiagnosticCounters: () -> Unit,
@@ -183,6 +202,7 @@ fun SettingsScreen(
     var wakeTabIndex by remember { mutableIntStateOf(0) }
     var draftWakeName by remember(settings.wakePhrase) { mutableStateOf(settings.wakePhrase) }
     var draftAckPhrase by remember(settings.wakeAckPhrase) { mutableStateOf(settings.wakeAckPhrase) }
+    var advancedExpanded by remember { mutableStateOf(false) }
 
     Box(
         modifier = Modifier
@@ -419,8 +439,9 @@ fun SettingsScreen(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     if (wakeTabIndex == 0) {
+                        val mfccCount = enrolledSamples.count { it.mfccSequence.isNotEmpty() }
                         Text(
-                            text = "سجل اسم التنبيه بصوتك لحد ${VoiceTemplateStore.MAX_SAMPLES} مرات لبناء نموذج MFCC-DTW محلي يتعرف على الاسم ونبرة صوتك.",
+                            text = "سجّل اسم التنبيه بصوتك ${VoiceTemplateStore.MIN_REQUIRED_SAMPLES} مرات (وحتى ${VoiceTemplateStore.MAX_SAMPLES}) لبناء نموذج MFCC-DTW محلي دقيق مع معايرة تلقائية لعتبة السمع.",
                             style = MaterialTheme.typography.bodySmall,
                             color = CheetahTextSecondary
                         )
@@ -430,9 +451,13 @@ fun SettingsScreen(
                         LinearProgressIndicator(
                             progress = {
                                 if (isRecordingEnrollment) enrollmentAmplitude
-                                else enrolledSamples.size.toFloat() / VoiceTemplateStore.MAX_SAMPLES
+                                else (mfccCount.toFloat() / VoiceTemplateStore.MIN_REQUIRED_SAMPLES).coerceIn(0f, 1f)
                             },
-                            color = if (isRecordingEnrollment) CheetahAmber else CheetahCyan,
+                            color = when {
+                                isRecordingEnrollment -> CheetahAmber
+                                mfccCount >= VoiceTemplateStore.MIN_REQUIRED_SAMPLES -> CheetahEmerald
+                                else -> CheetahCyan
+                            },
                             trackColor = CheetahDeepNavy,
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -447,11 +472,22 @@ fun SettingsScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = "النماذج المسجلة: ${enrolledSamples.size} / ${VoiceTemplateStore.MAX_SAMPLES}",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = CheetahTextPrimary
-                            )
+                            Column {
+                                Text(
+                                    text = "العينات المسجلة: $mfccCount / ${VoiceTemplateStore.MIN_REQUIRED_SAMPLES} (الحد الأقصى ${VoiceTemplateStore.MAX_SAMPLES})",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (mfccCount >= VoiceTemplateStore.MIN_REQUIRED_SAMPLES) CheetahEmerald else CheetahTextPrimary
+                                )
+                                Text(
+                                    text = if (wakeCalibration.isCalibrated) {
+                                        "معايرة DTW نشطة: عتبة ${(wakeCalibration.threshold * 100).toInt()}% (متوسط تطابق عيناتك ${(wakeCalibration.intraSampleMeanDtw * 100).toInt()}%)"
+                                    } else {
+                                        "أكمل ${VoiceTemplateStore.MIN_REQUIRED_SAMPLES} عينات واضحة لتثبيت المعايرة التلقائية"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = CheetahTextSecondary
+                                )
+                            }
                             if (enrolledSamples.isNotEmpty()) {
                                 OutlinedButton(
                                     onClick = onClearVoiceSamples,
@@ -500,7 +536,7 @@ fun SettingsScreen(
                                 } else if (!permissions.hasMicPermission) {
                                     "امنح صلاحية المايك للتسجيل"
                                 } else {
-                                    "اضغط وسجل بصوتك (${enrolledSamples.size + 1})"
+                                    "اضغط وسجل بصوتك (${(enrolledSamples.size + 1).coerceAtMost(VoiceTemplateStore.MAX_SAMPLES)}/${VoiceTemplateStore.MIN_REQUIRED_SAMPLES})"
                                 },
                                 color = CheetahObsidian,
                                 fontWeight = FontWeight.Bold
@@ -508,7 +544,7 @@ fun SettingsScreen(
                         }
                     } else {
                         Text(
-                            text = "اكتب اسم التنبيه بالعربي أو بالإنجليزي. في الوضع النصي الصرف بدون تسجيل صوتي، يتحقق النظام من الكلمة عبر STT المحلي عند سماع كلام واضح.",
+                            text = "اكتب اسم التنبيه بالعربي أو بالإنجليزي. في الوضع النصي الصرف بدون تسجيل صوتي، يتحقق النظام من الكلمة عبر Vosk STT المحلي عند سماع كلام واضح.",
                             style = MaterialTheme.typography.bodySmall,
                             color = CheetahTextSecondary
                         )
@@ -534,9 +570,22 @@ fun SettingsScreen(
                         Text(
                             text = enrollmentFeedbackAr,
                             style = MaterialTheme.typography.bodySmall,
-                            color = CheetahEmerald
+                            color = if (enrollmentFeedbackAr.contains("تشويش") || enrollmentFeedbackAr.contains("واطي") || enrollmentFeedbackAr.contains("دوشة") || enrollmentFeedbackAr.contains("تعذر")) {
+                                CheetahAmber
+                            } else {
+                                CheetahEmerald
+                            }
                         )
                     }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                    WakeTenSayTestPanel(
+                        wakePhrase = settings.wakePhrase,
+                        wakeTestState = wakeTestState,
+                        hasMicPermission = permissions.hasMicPermission,
+                        onStartTest = onStartWakeTenSayTest,
+                        onStopTest = onStopWakeTenSayTest
+                    )
 
                     HorizontalDivider(
                         color = CheetahBorder,
@@ -544,7 +593,7 @@ fun SettingsScreen(
                     )
 
                     Text(
-                        text = "حساسية كلمة التنبيه: ${(settings.wakeSensitivity * 100).toInt()}%",
+                        text = "حساسية كلمة التنبيه: ${(settings.wakeSensitivity * 100).toInt()}% (العتبة الفعلية ${(wakeCalibration.threshold * 100).toInt()}%)",
                         style = MaterialTheme.typography.bodyMedium,
                         color = CheetahTextPrimary
                     )
@@ -566,12 +615,12 @@ fun SettingsScreen(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "بصمة الصوت (Voice Match)",
+                                text = "بصمة الصوت (Voice Match — اختياري)",
                                 style = MaterialTheme.typography.titleMedium,
                                 color = CheetahTextPrimary
                             )
                             Text(
-                                text = "يتعرف على نبرة صوتك ويمنع تفعيل المساعد من أصوات تانية",
+                                text = "مقفولة افتراضياً؛ تُستخدم للمؤشرات الإضافية أو الحماية الحساسة فقط ولا تمنع كلمة التنبيه أو الأوامر العادية أبداً.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = CheetahTextSecondary
                             )
@@ -856,7 +905,18 @@ fun SettingsScreen(
                 )
             }
 
-            // 5. LOCAL UNBUNDLED GGUF LLM (PART B)
+            // 5. LOCAL VOSK OFFLINE STT MODEL
+            item {
+                LocalSttModelSettingsCard(
+                    offlineSttStatus = offlineSttStatus,
+                    isImporting = isImportingSttModel,
+                    importFeedbackAr = sttImportFeedbackAr,
+                    onPickSttModelZip = onPickSttModelZip,
+                    onRemoveSttModel = onRemoveSttModel
+                )
+            }
+
+            // 6. LOCAL UNBUNDLED GGUF LLM (PART B)
             item {
                 LocalGgufLlmCard(
                     settings = settings,
@@ -870,32 +930,7 @@ fun SettingsScreen(
                 )
             }
 
-            // 5B. AI BRAIN BEHAVIOR, THINKING MODE & SEARCH JUDGE SETTINGS (v0.4.0)
-            item {
-                AiBrainBehaviorCard(
-                    settings = settings,
-                    llmStatus = localLlmStatus,
-                    isBenchmarkRunning = isBenchmarkRunning,
-                    onUpdateAiBrainConfig = onUpdateAiBrainConfig,
-                    onUpdateDomainLists = onUpdateDomainLists,
-                    onRunBenchmark = onRunBenchmark
-                )
-            }
-
-            // 5C. EXPANDED LOCAL AI CONTROLS & JSON CONFIG EXPORT/IMPORT (v0.5.0)
-            item {
-                SettingsAiControlsCard(
-                    settings = settings,
-                    llmStatus = localLlmStatus,
-                    onApplyPreset = onApplyAiPreset,
-                    onUpdateExpandedConfig = onUpdateExpandedAiConfig,
-                    onResetAiDefaults = onResetAiDefaults,
-                    onExportAiConfig = onExportAiConfig,
-                    onImportAiConfig = onImportAiConfig
-                )
-            }
-
-            // 6. OPTIONAL KEYLESS INTERNET SEARCH & PARALLEL ENGINE SELECTOR (PART D + v0.5.0)
+            // 7. KEYLESS INTERNET SEARCH & PARALLEL ENGINE SELECTOR
             item {
                 KeylessInternetSearchCard(
                     settings = settings,
@@ -912,7 +947,7 @@ fun SettingsScreen(
                 )
             }
 
-            // 7. PERMISSIONS & BACKGROUND HEALTH CENTER (BUG A3 SWITCHES)
+            // 8. PERMISSIONS & BACKGROUND HEALTH CENTER (OS SINGLE SOURCE OF TRUTH)
             item {
                 SettingsSectionCard(
                     title = "مركز الصلاحيات وصحة الخلفية",
@@ -955,13 +990,21 @@ fun SettingsScreen(
                             .clip(RoundedCornerShape(4.dp))
                     )
 
+                    if (!permissions.isAutoRevokeExempted && !settings.autoRevokeTipDismissed) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        AutoRevokePermissionBanner(
+                            onOpenAutoRevokeSettings = onOpenAutoRevokeSettings,
+                            onDismiss = onDismissAutoRevokeTip
+                        )
+                    }
+
                     Spacer(modifier = Modifier.height(12.dp))
 
                     PermissionSwitchRow(
                         icon = Icons.Default.Mic,
-                        titleAr = "صلاحية المايكروفون",
-                        subtitleAr = "تفعيل أو إيقاف استخدام المايك لكلمة التنبيه والأوامر الصوتية.",
-                        checked = permissions.hasMicPermission && settings.micFeatureEnabled,
+                        titleAr = "صلاحية المايكروفون (حالة النظام)",
+                        subtitleAr = "مرآة مباشرة لإذن أندرويد — لإلغاء الإذن يتم التحويل لإعدادات التطبيق.",
+                        checked = permissions.hasMicPermission,
                         osGranted = permissions.hasMicPermission,
                         testTag = "perm_mic_switch",
                         onCheckedChange = onToggleMicSwitch
@@ -971,7 +1014,7 @@ fun SettingsScreen(
                             icon = Icons.Default.Notifications,
                             titleAr = "إشعارات خدمة الخلفية (Android 13+)",
                             subtitleAr = "تظهر إشعار واضح ومفتاح كتم أثناء عمل المايك.",
-                            checked = permissions.hasNotificationPermission && settings.notificationsFeatureEnabled,
+                            checked = permissions.hasNotificationPermission,
                             osGranted = permissions.hasNotificationPermission,
                             testTag = "perm_notif_switch",
                             onCheckedChange = onToggleNotificationSwitch
@@ -984,7 +1027,7 @@ fun SettingsScreen(
                         checked = permissions.isBatteryOptimizationIgnored,
                         osGranted = permissions.isBatteryOptimizationIgnored,
                         testTag = "perm_battery_switch",
-                        onCheckedChange = onToggleBatterySwitch
+                        onCheckedChange = { onToggleBatterySwitch() }
                     )
                     PermissionSwitchRow(
                         icon = Icons.Default.AccessibilityNew,
@@ -993,7 +1036,7 @@ fun SettingsScreen(
                         checked = permissions.isAccessibilityEnabled,
                         osGranted = permissions.isAccessibilityEnabled,
                         testTag = "perm_accessibility_switch",
-                        onCheckedChange = onToggleAccessibilitySwitch
+                        onCheckedChange = { onToggleAccessibilitySwitch() }
                     )
 
                     Spacer(modifier = Modifier.height(6.dp))
@@ -1026,26 +1069,12 @@ fun SettingsScreen(
                 }
             }
 
-            // 8. LOCAL ENGINE STATUS (STT / TTS / MFCC-DTW)
+            // 9. LOCAL ENGINE STATUS (STT / TTS / MFCC-DTW)
             item {
                 LocalEngineStatusCard(
                     offlineSttStatus = offlineSttStatus,
                     ttsStatus = ttsStatus,
                     diagnostics = diagnostics
-                )
-            }
-
-            // 9. WAKE-WORD DIAGNOSTIC CONSOLE & TRANSITION LOG
-            item {
-                WakeDiagnosticConsoleCard(
-                    diagnostics = diagnostics,
-                    transitionLog = transitionLog,
-                    liveMicLevel = liveMicLevel,
-                    serviceRunning = serviceRunning,
-                    onRunMicDiagnosticTest = onRunMicDiagnosticTest,
-                    onMarkFalseActivation = onMarkFalseActivation,
-                    onResetCounters = onResetDiagnosticCounters,
-                    onClearTransitionLog = onClearTransitionLog
                 )
             }
 
@@ -1058,6 +1087,88 @@ fun SettingsScreen(
                     onDeleteMemoryEntry = onDeleteMemoryEntry,
                     onClearAllMemory = onClearAllMemory
                 )
+            }
+
+            // 11. CONSOLIDATED COLLAPSIBLE ADVANCED / EXPERT CARD (DEFAULT COLLAPSED)
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = CheetahCard),
+                    shape = RoundedCornerShape(20.dp),
+                    border = BorderStroke(1.dp, if (advancedExpanded) CheetahCyan.copy(alpha = 0.5f) else CheetahBorder)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { advancedExpanded = !advancedExpanded }
+                                .padding(vertical = 4.dp)
+                                .testTag("settings_advanced_toggle"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                Icon(imageVector = Icons.Default.Tune, contentDescription = null, tint = CheetahAmber)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = "إعدادات متقدمة (Advanced)",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = CheetahAmber
+                                    )
+                                    Text(
+                                        text = "تفكير الذكاء وتقييم البحث، إعدادات التوليد، والتشخيص الذاتي",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = CheetahTextSecondary
+                                    )
+                                }
+                            }
+                            Icon(
+                                imageVector = if (advancedExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                contentDescription = if (advancedExpanded) "طي الإعدادات المتقدمة" else "فتح الإعدادات المتقدمة",
+                                tint = CheetahCyan
+                            )
+                        }
+
+                        AnimatedVisibility(visible = advancedExpanded) {
+                            Column(
+                                verticalArrangement = Arrangement.spacedBy(14.dp),
+                                modifier = Modifier.padding(top = 12.dp)
+                            ) {
+                                AiBrainBehaviorCard(
+                                    settings = settings,
+                                    llmStatus = localLlmStatus,
+                                    isBenchmarkRunning = isBenchmarkRunning,
+                                    onUpdateAiBrainConfig = onUpdateAiBrainConfig,
+                                    onUpdateDomainLists = onUpdateDomainLists,
+                                    onRunBenchmark = onRunBenchmark
+                                )
+
+                                SettingsAiControlsCard(
+                                    settings = settings,
+                                    llmStatus = localLlmStatus,
+                                    onApplyPreset = onApplyAiPreset,
+                                    onUpdateExpandedConfig = onUpdateExpandedAiConfig,
+                                    onResetAiDefaults = onResetAiDefaults,
+                                    onExportAiConfig = onExportAiConfig,
+                                    onImportAiConfig = onImportAiConfig
+                                )
+
+                                WakeDiagnosticConsoleCard(
+                                    diagnostics = diagnostics,
+                                    transitionLog = transitionLog,
+                                    liveMicLevel = liveMicLevel,
+                                    serviceRunning = serviceRunning,
+                                    selfTestState = selfTestState,
+                                    onRunThreeStageSelfTest = onRunThreeStageSelfTest,
+                                    onRunMicDiagnosticTest = onRunMicDiagnosticTest,
+                                    onMarkFalseActivation = onMarkFalseActivation,
+                                    onResetCounters = onResetDiagnosticCounters,
+                                    onClearTransitionLog = onClearTransitionLog
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
     }

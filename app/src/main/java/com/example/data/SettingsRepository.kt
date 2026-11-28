@@ -92,14 +92,17 @@ class SettingsRepository(private val context: Context) {
         val REQUIRE_VOICE_MATCH_COMMS = booleanPreferencesKey("require_voice_match_comms")
         val DIALER_INSTEAD_OF_DIRECT_CALL = booleanPreferencesKey("dialer_instead_of_direct_call")
 
-        val MIC_FEATURE_ENABLED = booleanPreferencesKey("mic_feature_enabled")
-        val NOTIF_FEATURE_ENABLED = booleanPreferencesKey("notif_feature_enabled")
-        val BATTERY_FEATURE_ENABLED = booleanPreferencesKey("battery_feature_enabled")
-        val ACCESSIBILITY_FEATURE_ENABLED = booleanPreferencesKey("accessibility_feature_enabled")
         val MIC_ASKED_ONCE = booleanPreferencesKey("mic_asked_once")
         val NOTIF_ASKED_ONCE = booleanPreferencesKey("notif_asked_once")
+        val AUTO_REVOKE_TIP_DISMISSED = booleanPreferencesKey("auto_revoke_tip_dismissed")
 
-        // Keyless Internet Search (OFF by default)
+        // Local Offline Vosk STT Model
+        val STT_MODEL_DIR = stringPreferencesKey("stt_model_dir")
+        val STT_MODEL_NAME = stringPreferencesKey("stt_model_name")
+        val STT_MODEL_SIZE = longPreferencesKey("stt_model_size")
+        val STT_MODEL_LANG = stringPreferencesKey("stt_model_lang")
+
+        // Keyless Internet Search (ON by default; sends only cleaned query)
         val INTERNET_SEARCH_ENABLED = booleanPreferencesKey("internet_search_enabled")
         val SEARCH_ENGINE_MODE = stringPreferencesKey("search_engine_mode")
         val AUTO_SEARCH_ORDER = stringPreferencesKey("auto_search_order")
@@ -164,7 +167,7 @@ class SettingsRepository(private val context: Context) {
                 runCatching { WakeWordSetupMode.valueOf(it) }.getOrNull()
             } ?: WakeWordSetupMode.TEXT_TYPED,
             wakeSensitivity = prefs[Keys.WAKE_SENSITIVITY] ?: 0.65f,
-            voiceMatchEnabled = prefs[Keys.VOICE_MATCH_ENABLED] ?: true,
+            voiceMatchEnabled = prefs[Keys.VOICE_MATCH_ENABLED] ?: false,
             voiceMatchThreshold = prefs[Keys.VOICE_MATCH_THRESHOLD] ?: 0.68f,
             allowOwnerFallbackOnLowVoiceMatch = prefs[Keys.VOICE_MATCH_FALLBACK] ?: true,
             wakeAckPhrase = prefs[Keys.WAKE_ACK_PHRASE]?.takeIf { it.isNotBlank() } ?: "أيوه، معاك",
@@ -176,15 +179,16 @@ class SettingsRepository(private val context: Context) {
             continuousListeningEnabled = prefs[Keys.CONTINUOUS_LISTENING] ?: false,
             isListeningMuted = prefs[Keys.LISTENING_MUTED] ?: false,
             allowAccessibilityAutomation = prefs[Keys.ALLOW_ACCESSIBILITY] ?: false,
-            requireVoiceMatchForSensitive = prefs[Keys.REQUIRE_VOICE_MATCH_COMMS] ?: true,
+            requireVoiceMatchForSensitive = prefs[Keys.REQUIRE_VOICE_MATCH_COMMS] ?: false,
             openDialerInsteadOfDirectCall = prefs[Keys.DIALER_INSTEAD_OF_DIRECT_CALL] ?: true,
-            micFeatureEnabled = prefs[Keys.MIC_FEATURE_ENABLED] ?: true,
-            notificationsFeatureEnabled = prefs[Keys.NOTIF_FEATURE_ENABLED] ?: true,
-            batteryExemptionFeatureEnabled = prefs[Keys.BATTERY_FEATURE_ENABLED] ?: false,
-            accessibilityFeatureEnabled = prefs[Keys.ACCESSIBILITY_FEATURE_ENABLED] ?: false,
             micPermissionRequestedOnce = prefs[Keys.MIC_ASKED_ONCE] ?: false,
             notifPermissionRequestedOnce = prefs[Keys.NOTIF_ASKED_ONCE] ?: false,
-            internetSearchEnabled = prefs[Keys.INTERNET_SEARCH_ENABLED] ?: false,
+            autoRevokeTipDismissed = prefs[Keys.AUTO_REVOKE_TIP_DISMISSED] ?: false,
+            sttModelDir = prefs[Keys.STT_MODEL_DIR].orEmpty(),
+            sttModelName = prefs[Keys.STT_MODEL_NAME].orEmpty(),
+            sttModelSizeBytes = prefs[Keys.STT_MODEL_SIZE] ?: 0L,
+            sttModelLanguage = prefs[Keys.STT_MODEL_LANG]?.takeIf { it.isNotBlank() } ?: "ar",
+            internetSearchEnabled = prefs[Keys.INTERNET_SEARCH_ENABLED] ?: true,
             searchEngineMode = prefs[Keys.SEARCH_ENGINE_MODE]?.let {
                 runCatching { SearchEngineMode.valueOf(it) }.getOrNull()
             } ?: SearchEngineMode.DUCKDUCKGO,
@@ -374,21 +378,42 @@ class SettingsRepository(private val context: Context) {
         }
     }
 
-    suspend fun setPermissionFeatureState(
-        micEnabled: Boolean? = null,
-        notifEnabled: Boolean? = null,
-        batteryEnabled: Boolean? = null,
-        accessibilityEnabled: Boolean? = null,
+    suspend fun setPermissionAskedOnce(
         micAskedOnce: Boolean? = null,
         notifAskedOnce: Boolean? = null
     ) {
         context.cheetahDataStore.edit { prefs ->
-            micEnabled?.let { prefs[Keys.MIC_FEATURE_ENABLED] = it }
-            notifEnabled?.let { prefs[Keys.NOTIF_FEATURE_ENABLED] = it }
-            batteryEnabled?.let { prefs[Keys.BATTERY_FEATURE_ENABLED] = it }
-            accessibilityEnabled?.let { prefs[Keys.ACCESSIBILITY_FEATURE_ENABLED] = it }
             micAskedOnce?.let { prefs[Keys.MIC_ASKED_ONCE] = it }
             notifAskedOnce?.let { prefs[Keys.NOTIF_ASKED_ONCE] = it }
+        }
+    }
+
+    suspend fun dismissAutoRevokeTip() {
+        context.cheetahDataStore.edit { prefs ->
+            prefs[Keys.AUTO_REVOKE_TIP_DISMISSED] = true
+        }
+    }
+
+    suspend fun updateLocalSttModel(
+        modelDir: String,
+        displayName: String,
+        sizeBytes: Long,
+        languageTag: String
+    ) {
+        context.cheetahDataStore.edit { prefs ->
+            prefs[Keys.STT_MODEL_DIR] = modelDir
+            prefs[Keys.STT_MODEL_NAME] = displayName
+            prefs[Keys.STT_MODEL_SIZE] = sizeBytes.coerceAtLeast(0L)
+            prefs[Keys.STT_MODEL_LANG] = languageTag.ifBlank { "ar" }
+        }
+    }
+
+    suspend fun clearLocalSttModel() {
+        context.cheetahDataStore.edit { prefs ->
+            prefs[Keys.STT_MODEL_DIR] = ""
+            prefs[Keys.STT_MODEL_NAME] = ""
+            prefs[Keys.STT_MODEL_SIZE] = 0L
+            prefs[Keys.STT_MODEL_LANG] = "ar"
         }
     }
 

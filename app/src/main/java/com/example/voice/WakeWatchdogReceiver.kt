@@ -48,10 +48,7 @@ class WakeWatchdogReceiver : BroadcastReceiver() {
                 if (!hasMic) return@launch
 
                 if (!CheetahRuntimeBus.serviceRunning.value) {
-                    val started = runCatching {
-                        WakeWordDetectionService.start(appContext)
-                        true
-                    }.getOrDefault(false)
+                    val started = WakeWordDetectionService.start(appContext)
                     if (!started) {
                         postRecoveryNotification(appContext)
                     }

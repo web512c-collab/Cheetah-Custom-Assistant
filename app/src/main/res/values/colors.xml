@@ -1,11 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="cheetah_obsidian">#FF070B14</color>
-    <color name="cheetah_surface">#FF0F172A</color>
-    <color name="cheetah_cyan">#FF22D3EE</color>
-    <color name="cheetah_amber">#FFF59E0B</color>
-    <color name="cheetah_emerald">#FF10B981</color>
-    <color name="cheetah_crimson">#FFEF4444</color>
-    <color name="black">#FF000000</color>
-    <color name="white">#FFFFFFFF</color>
 </resources>

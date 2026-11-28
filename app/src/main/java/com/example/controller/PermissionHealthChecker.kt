@@ -42,13 +42,19 @@ object PermissionHealthChecker {
             CheetahAccessibilityService.activeInstance != null
         val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
         val batteryIgnored = powerManager?.isIgnoringBatteryOptimizations(context.packageName) ?: false
+        val autoRevokeExempted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching { context.packageManager.isAutoRevokeWhitelisted }.getOrDefault(true)
+        } else {
+            true
+        }
 
         return PermissionHealthState(
             hasMicPermission = hasMic,
             hasNotificationPermission = hasNotif,
             isDefaultAssistant = isDefaultAssistant,
             isAccessibilityEnabled = isAccessibility,
-            isBatteryOptimizationIgnored = batteryIgnored
+            isBatteryOptimizationIgnored = batteryIgnored,
+            isAutoRevokeExempted = autoRevokeExempted
         )
     }
 
@@ -117,6 +123,19 @@ object PermissionHealthChecker {
             Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
             Uri.parse("package:${context.packageName}")
         ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+    fun buildAutoRevokeIntent(context: Context): Intent {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val intent = Intent(Intent.ACTION_AUTO_REVOKE_PERMISSIONS).apply {
+                data = Uri.fromParts("package", context.packageName, null)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            if (intent.resolveActivity(context.packageManager) != null) {
+                return intent
+            }
+        }
+        return buildAppDetailsSettingsIntent(context)
+    }
 
     fun isPermissionPermanentlyDenied(
         activity: android.app.Activity?,

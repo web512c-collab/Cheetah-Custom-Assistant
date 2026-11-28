@@ -2,6 +2,27 @@
 
 All notable changes to **Sheeta Custom Assistant** (formerly Cheetah Custom Assistant) are documented in this file.
 
+## v0.5.1 (2026-11-28)
+
+**Version:** `0.5.1` (`versionCode = 7`, up from `versionCode = 6` in `v0.5.0`)  
+**Signing:** Preserves `applicationId = com.aistudio.cheetahassistant.egxkar`, Kotlin namespace `com.example.*`, `debug.keystore`, and `debug.keystore.base64` untouched. Fail-fast CI check rejects missing keystore files instead of generating mismatched random keys (if a previous APK came from an older random CI keystore run, uninstall once before installing `v0.5.1`).
+
+### Offline & Google-Free Voice Core (`vosk-android`, `EgyptianOfflineSttManager`, `EgyptianTtsManager`)
+- **Removed Google `SpeechRecognizer` & `CheetahRecognitionService`:** Eliminated `android.speech.SpeechRecognizer` and `RecognitionService` manifests/dependencies so speech-to-text never routes through Google Speech Services or requires cloud connectivity.
+- **Added True Offline Vosk STT (`com.alphacephei:vosk-android:0.3.47`):** Captures 16 kHz Mono PCM directly from `AudioRecord` with real-time RMS/VAD endpointing, safe SAF `.zip` Vosk model importer (`SettingsVoiceAndPermissionsCards` -> `LocalSttModelSettingsCard`), and clean nested-directory validation.
+- **Offline TTS & Google TTS Warning (`EgyptianTtsManager`):** Filters candidate voices strictly for `!isNetworkConnectionRequired`, exposes active `enginePackage`, and displays an honest Arabic notice if `com.google.android.tts` is the active system TTS engine.
+- **Honest Network Isolation Boundary (`StaticNetworkBoundaryTest`):** Enabled `internetSearchEnabled = true` by default with clear disclosure in Settings/About/README, improved offline/DNS/timeout errors (`UnknownHostException`, `SocketTimeoutException`, `ConnectException`), and added static verification confirming zero network sockets, HTTP clients, `SpeechRecognizer`, or GMS imports exist outside `com.example.search`.
+
+### OS Single-Truth Permissions & Clear Error Diagnostics (`PermissionHealthChecker`, `VoiceErrorMapper`, `ConsoleScreen`)
+- **Removed Duplicate Permission Booleans:** Eliminated `micFeatureEnabled`, `notificationsFeatureEnabled`, `batteryExemptionFeatureEnabled`, `accessibilityFeatureEnabled`, and `overlayFeatureEnabled` from `AssistantSettings`; UI switches now reflect real Android OS state refreshed on `ON_RESUME`.
+- **Non-Nagging & Safe Console:** `RECORD_AUDIO` system prompt runs only from Settings when tapped (routing revoked/denied states to App Info), while `ConsoleScreen` never triggers OS permission dialogs and shows an inline `"فتح الإعدادات"` notice instead.
+- **Android 11+ Auto-Revoke Detection & Distinct Failure Mapping:** Added `isAutoRevokeWhitelisted` health check with a dismissible Settings banner + App Info button, and introduced `VoiceErrorMapper` giving distinct Egyptian Arabic errors for denied mic, OS background mic block, missing Vosk model, Vosk load error, hardware capture failure, and silence/noise.
+
+### Wake Word, Background Service & UI Clean-Up (`WakeWordEngine`, `WakeThresholdCalibrator`, `WakeWordDetectionService`, `SettingsScreen`)
+- **Personalized MFCC-DTW Primary + Calibrated Thresholds:** Demoted bundled `CHKW-v1` to `<= 10%` auxiliary tie-breaker prior (`MAX_CHKW_TIE_BREAKER_PRIOR`), raised required user samples to `5` (`MAX_SAMPLES = 8`) with audio quality gating (`validateAudioQuality`), added `WakeThresholdCalibrator` dynamic intra-speaker calibration, defaulted `voiceMatchEnabled = false`, and guaranteed ordinary commands never fail due to speaker score.
+- **Hardened `WakeWordDetectionService`:** Calls `startForegroundCompat` on every `onStartCommand`, catches Android 14+ FGS background exceptions cleanly with a one-tap notification fallback, keeps DataStore/TTS out of the 40 ms audio capture loop, and emits `WakeEvalTelemetry` diagnostics.
+- **Usability & Deep Clean-Up:** Added Console **Talk** button (`"تحدث الآن (Talk)"`) bypassing wake word straight into Vosk STT, a 10-say `"Test wake word"` counter, a 3-stage Diagnostics `"Self-test"`, removed `ArchitectureScreen` tab (`4 -> 3` tabs), consolidated expert AI & diagnostic panels under one collapsed `"إعدادات متقدمة (Advanced)"` expandable card, and added `V051RepairAndVoiceUnitTest` + `StaticNetworkBoundaryTest`.
+
 ## v0.5.0 (2026-11-27)
 
 **Version:** `0.5.0` (`versionCode = 6`, up from `versionCode = 5` in `v0.4.1`)  

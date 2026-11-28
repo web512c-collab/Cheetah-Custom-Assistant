@@ -2,6 +2,8 @@ package com.example.data
 
 import android.content.Context
 import com.example.core.model.VoiceTemplateSample
+import com.example.voice.WakeCalibrationResult
+import com.example.voice.WakeThresholdCalibrator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -16,24 +18,31 @@ import kotlin.math.sqrt
  * Self-contained local store for acoustic MFCC-DTW wake-word templates and Voice Match
  * speaker vectors. Persisted in app-private filesDir and excluded from cloud backups.
  */
-class VoiceTemplateStore(context: Context) {
+class VoiceTemplateStore internal constructor(
+    storageDir: File,
+    private val persistToDisk: Boolean = true
+) {
 
-    private val templateFile = File(context.filesDir, "cheetah_voice_templates.json")
+    constructor(context: Context) : this(context.filesDir, persistToDisk = true)
+
+    private val templateFile = File(storageDir, "cheetah_voice_templates.json")
     private val _samples = MutableStateFlow<List<VoiceTemplateSample>>(emptyList())
     val samples: StateFlow<List<VoiceTemplateSample>> = _samples.asStateFlow()
 
     init {
-        _samples.value = loadFromDisk()
+        _samples.value = if (persistToDisk) loadFromDisk() else emptyList()
     }
 
     suspend fun addSample(sample: VoiceTemplateSample) = withContext(Dispatchers.IO) {
         val updated = (_samples.value + sample).takeLast(MAX_SAMPLES)
-        saveToDisk(updated)
+        if (persistToDisk) {
+            saveToDisk(updated)
+        }
         _samples.value = updated
     }
 
     suspend fun clearAll() = withContext(Dispatchers.IO) {
-        if (templateFile.exists()) {
+        if (persistToDisk && templateFile.exists()) {
             templateFile.delete()
         }
         _samples.value = emptyList()
@@ -69,6 +78,10 @@ class VoiceTemplateStore(context: Context) {
             centroid[i] /= denom
         }
         return centroid
+    }
+
+    fun getCalibratedThreshold(sensitivity: Float): WakeCalibrationResult {
+        return WakeThresholdCalibrator.calibrate(_samples.value, sensitivity)
     }
 
     private fun loadFromDisk(): List<VoiceTemplateSample> {
@@ -136,6 +149,7 @@ class VoiceTemplateStore(context: Context) {
     }
 
     companion object {
-        const val MAX_SAMPLES = 3
+        const val MIN_REQUIRED_SAMPLES = 5
+        const val MAX_SAMPLES = 8
     }
 }

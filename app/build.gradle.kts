@@ -13,10 +13,8 @@ android {
     applicationId = "com.aistudio.cheetahassistant.egxkar"
     minSdk = 24
     targetSdk = 36
-    versionCode = 6
-    versionName = "0.5.0"
-
-    testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    versionCode = 7
+    versionName = "0.5.1"
 
     externalNativeBuild {
       cmake {
@@ -103,17 +101,13 @@ dependencies {
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.kotlinx.serialization.json)
+  implementation(libs.vosk.android)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
   testImplementation(libs.junit)
   testImplementation(libs.kotlinx.coroutines.test)
   testImplementation(libs.robolectric)
-  androidTestImplementation(platform(libs.androidx.compose.bom))
-  androidTestImplementation(libs.androidx.compose.ui.test.junit4)
-  androidTestImplementation(libs.androidx.espresso.core)
-  androidTestImplementation(libs.androidx.junit)
-  androidTestImplementation(libs.androidx.runner)
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
 }

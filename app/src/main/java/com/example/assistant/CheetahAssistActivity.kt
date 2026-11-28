@@ -47,9 +47,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.controller.PermissionHealthChecker
 import com.example.data.ConversationMemoryStore
 import com.example.data.SettingsRepository
 import com.example.intelligence.AssistantCommandProcessor
@@ -63,6 +65,7 @@ import com.example.voice.EgyptianOfflineSttManager
 import com.example.voice.EgyptianTtsManager
 import com.example.voice.MicOwner
 import com.example.voice.MicrophoneArbitrator
+import com.example.voice.VoiceErrorMapper
 import com.example.voice.WakeWordDetectionService
 import kotlinx.coroutines.launch
 
@@ -125,6 +128,7 @@ private fun AssistOverlaySheet(
     settingsRepo: SettingsRepository,
     commandProcessor: AssistantCommandProcessor
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var assistantTitle by remember { mutableStateOf("شيتا — المساعد الشخصي") }
     var statusText by remember {
@@ -181,7 +185,13 @@ private fun AssistOverlaySheet(
                     executeCommand(finalText)
                 },
                 onFailure = { err ->
-                    transcript = err.message ?: "تعذر الاستماع"
+                    val hasMic = PermissionHealthChecker.inspect(context).hasMicPermission
+                    val hasModel = sttManager.isOnDeviceSupported()
+                    transcript = VoiceErrorMapper.mapFailure(
+                        rawReason = err.message,
+                        hasMicPermission = hasMic,
+                        hasLocalSttModel = hasModel
+                    ).messageAr
                 }
             )
         }

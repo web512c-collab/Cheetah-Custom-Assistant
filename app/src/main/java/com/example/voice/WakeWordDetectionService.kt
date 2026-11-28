@@ -40,6 +40,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
@@ -61,6 +62,7 @@ class WakeWordDetectionService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var captureSupervisorJob: Job? = null
     private var watchdogJob: Job? = null
+    private var settingsCollectorJob: Job? = null
 
     private lateinit var settingsRepository: SettingsRepository
     private lateinit var templateStore: VoiceTemplateStore
@@ -75,6 +77,12 @@ class WakeWordDetectionService : Service() {
     private val stateMachine = WakeStateMachine { entry ->
         CheetahRuntimeBus.recordStateTransition(entry)
     }
+
+    @Volatile
+    private var cachedSettings: AssistantSettings = AssistantSettings()
+
+    @Volatile
+    private var lastAppliedTtsKey: Pair<AssistantGender, String>? = null
 
     @Volatile
     private var isMuted = false
@@ -102,17 +110,50 @@ class WakeWordDetectionService : Service() {
 
         createNotificationChannel()
 
+        settingsCollectorJob = serviceScope.launch {
+            settingsRepository.settingsFlow
+                .distinctUntilChanged()
+                .collect { s ->
+                    cachedSettings = s
+                    isMuted = s.isListeningMuted
+                    val voiceKey = s.voiceGender to s.selectedTtsVoiceName
+                    if (voiceKey != lastAppliedTtsKey && !ttsManager.isSpeaking.value) {
+                        lastAppliedTtsKey = voiceKey
+                        ttsManager.applyVoicePreferences(s.voiceGender, s.selectedTtsVoiceName)
+                    }
+                    if (CheetahRuntimeBus.serviceRunning.value) {
+                        runCatching { updateNotification(s) }
+                    }
+                    updateModelDiagnostics(s)
+                }
+        }
+
         if (modelResult.isFailure) {
             CheetahRuntimeBus.updateDiagnostics {
                 it.copy(
-                    lastError = "تعذر تحميل النموذج المدمج: ${modelResult.exceptionOrNull()?.message ?: "unknown"}"
+                    lastError = "تعذر تحميل النموذج المدمج المساعد: ${modelResult.exceptionOrNull()?.message ?: "unknown"}"
                 )
             }
         }
-        updateModelDiagnostics(settingsRepository)
+        updateModelDiagnostics(cachedSettings)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Call startForeground immediately on every start command entry so Android 12–16 never throws
+        // ForegroundServiceDidNotStartInTimeException regardless of action or early bailout.
+        val startedFg = runCatching {
+            startForegroundCompat(cachedSettings)
+            true
+        }.getOrElse { err ->
+            CheetahRuntimeBus.updateDiagnostics {
+                it.copy(
+                    audioRecordStatus = "FGS_RESTRICTED",
+                    lastError = "تعذر تثبيت خدمة الخلفية من النظام: ${err.message ?: err.javaClass.simpleName}"
+                )
+            }
+            false
+        }
+
         when (intent?.action) {
             ACTION_STOP -> {
                 serviceScope.launch {
@@ -128,12 +169,13 @@ class WakeWordDetectionService : Service() {
                 isMuted = !isMuted
                 serviceScope.launch {
                     settingsRepository.setListeningMuted(isMuted)
-                    val s = settingsRepository.currentSettings()
+                    val s = cachedSettings.copy(isListeningMuted = isMuted)
+                    cachedSettings = s
                     updateNotification(s)
                 }
                 CheetahRuntimeBus.updateDiagnostics {
                     it.copy(
-                        wakeEngineStatus = if (isMuted) "MUTED" else activeEngineLabel(settingsRepository),
+                        wakeEngineStatus = if (isMuted) "MUTED" else activeEngineLabel(cachedSettings),
                         lastAudioEvent = if (isMuted) "تم كتم المايك مؤقتاً" else "تم استئناف الاستماع لكلمة التنبيه"
                     )
                 }
@@ -142,18 +184,24 @@ class WakeWordDetectionService : Service() {
 
             ACTION_RELOAD_TEMPLATES -> {
                 templateStore.reload()
-                updateModelDiagnostics(settingsRepository)
+                updateModelDiagnostics(cachedSettings)
                 return START_STICKY
             }
 
             ACTION_RUN_DIAGNOSTIC_TEST -> {
-                diagnosticTestUntilMs = System.currentTimeMillis() + 5_500L
+                val windowMs = intent.getLongExtra(EXTRA_DIAGNOSTIC_DURATION_MS, 12_000L).coerceIn(5_000L, 60_000L)
+                diagnosticTestUntilMs = System.currentTimeMillis() + windowMs
                 CheetahRuntimeBus.updateDiagnostics {
-                    it.copy(lastAudioEvent = "وضع الاختبار التشخيصي نشط لمدة 5 ثوانٍ — قل كلمة التنبيه الآن")
+                    it.copy(lastAudioEvent = "وضع الاختبار المباشر لكلمة التنبيه نشط — قل كلمة التنبيه الآن")
                 }
                 if (captureSupervisorJob?.isActive == true) {
                     return START_STICKY
                 }
+            }
+
+            ACTION_CANCEL_DIAGNOSTIC_TEST -> {
+                diagnosticTestUntilMs = 0L
+                return START_STICKY
             }
         }
 
@@ -163,19 +211,22 @@ class WakeWordDetectionService : Service() {
             CheetahRuntimeBus.updateDiagnostics {
                 it.copy(
                     audioRecordStatus = "PERMISSION_DENIED",
-                    lastError = "صلاحية المايكروفون غير ممنوحة"
+                    lastError = VoiceErrorMapper.mapFailure(
+                        rawReason = "MIC_PERMISSION_DENIED",
+                        hasMicPermission = false,
+                        hasLocalSttModel = sttManager.isOnDeviceSupported()
+                    ).messageAr
                 )
             }
+            stopForegroundCompat()
             stopSelf()
             return START_NOT_STICKY
         }
 
-        startForegroundCompat(AssistantSettings())
-        serviceScope.launch {
-            val s = settingsRepository.currentSettings()
-            isMuted = s.isListeningMuted
-            ttsManager.applyVoicePreferences(s.voiceGender, s.selectedTtsVoiceName)
-            updateNotification(s)
+        if (!startedFg) {
+            WakeWatchdogReceiver.postRecoveryNotification(applicationContext)
+            stopSelf()
+            return START_NOT_STICKY
         }
 
         CheetahRuntimeBus.setServiceRunning(true)
@@ -271,11 +322,12 @@ class WakeWordDetectionService : Service() {
         var consecutiveReadErrors = 0
         var initFailCount = 0
 
+        var consecutiveZeroRms = 0
+
         try {
             while (serviceScope.isActive) {
-                val settings = settingsRepository.currentSettings()
+                val settings = cachedSettings
                 isMuted = settings.isListeningMuted
-                ttsManager.applyVoicePreferences(settings.voiceGender, settings.selectedTtsVoiceName)
 
                 val shouldYield = isMuted ||
                     CheetahRuntimeBus.isSttActive.value ||
@@ -384,6 +436,25 @@ class WakeWordDetectionService : Service() {
                 val rms = AudioFeatureExtractor.computeRms(chunk, read)
                 CheetahRuntimeBus.updateMicLevel((rms * 5.0f).coerceIn(0f, 1f))
 
+                if (rms < 1e-5f) {
+                    consecutiveZeroRms++
+                    if (consecutiveZeroRms == 40) {
+                        CheetahRuntimeBus.updateDiagnostics {
+                            it.copy(
+                                audioRecordStatus = "BACKGROUND_MIC_BLOCKED",
+                                lastError = VoiceErrorMapper.mapFailure(
+                                    rawReason = "AUDIO_SILENCED",
+                                    hasMicPermission = true,
+                                    hasLocalSttModel = sttManager.isOnDeviceSupported(),
+                                    isBackgroundContext = true
+                                ).messageAr
+                            )
+                        }
+                    }
+                } else {
+                    consecutiveZeroRms = 0
+                }
+
                 if (calibrationFrames < 12) {
                     noiseFloorRms = if (calibrationFrames == 0) rms else (noiseFloorRms * 0.7f + rms * 0.3f)
                     calibrationFrames++
@@ -438,14 +509,22 @@ class WakeWordDetectionService : Service() {
 
                             val isDiagnosticRun = System.currentTimeMillis() <= diagnosticTestUntilMs
                             val mfccCount = templateStore.samples.value.count { it.mfccSequence.isNotEmpty() }
-                            val canRunAcousticModel = mfccCount > 0 ||
-                                (bundledModel != null && wakeWordEngine.isUsingDefaultYaSheetaPhrase(settings))
+                            val canRunAcousticModel = mfccCount > 0 || isDiagnosticRun
 
                             if (canRunAcousticModel) {
                                 val evalResult = wakeWordEngine.evaluate(
                                     pcmUtterance = utterance,
                                     noiseFloorRms = noiseFloorRms,
                                     settings = settings
+                                )
+                                CheetahRuntimeBus.emitWakeEval(
+                                    WakeEvalTelemetry(
+                                        detected = evalResult.detected,
+                                        confidence = evalResult.wakeConfidence,
+                                        threshold = evalResult.thresholdUsed,
+                                        source = evalResult.detectionSource,
+                                        timestampMs = System.currentTimeMillis()
+                                    )
                                 )
                                 CheetahRuntimeBus.updateDiagnostics {
                                     it.copy(
@@ -654,11 +733,20 @@ class WakeWordDetectionService : Service() {
 
             val captured = sttResult.getOrNull()?.trim()
             if (captured.isNullOrEmpty()) {
-                val errMsg = sttResult.exceptionOrNull()?.message ?: "ماسمعتش أمر واضح يا فندم."
-                CheetahRuntimeBus.updateDiagnostics { it.copy(lastError = errMsg) }
+                val rawErr = sttResult.exceptionOrNull()?.message
+                val mapped = VoiceErrorMapper.mapFailure(
+                    rawReason = rawErr,
+                    hasMicPermission = ContextCompat.checkSelfPermission(
+                        this,
+                        Manifest.permission.RECORD_AUDIO
+                    ) == PackageManager.PERMISSION_GRANTED,
+                    hasLocalSttModel = sttManager.isOnDeviceSupported(),
+                    isBackgroundContext = true
+                )
+                CheetahRuntimeBus.updateDiagnostics { it.copy(lastError = mapped.messageAr) }
                 stateMachine.transition(WakePipelineState.SPEAKING, "speak_stt_retry_prompt", isError = true)
                 ttsManager.speakAndAwait(
-                    text = errMsg,
+                    text = mapped.messageAr,
                     rate = settings.ttsSpeechRate,
                     pitch = settings.ttsPitch,
                     voiceGender = settings.voiceGender,
@@ -783,46 +871,28 @@ class WakeWordDetectionService : Service() {
 
     private fun buildModelStatusLabel(): String {
         val mfccCount = templateStore.samples.value.count { it.mfccSequence.isNotEmpty() }
-        val bin = bundledModel
-        return if (bin != null) {
-            "CHKW-v1 ('يا شيتا', ${bin.modelSizeBytes}B) + $mfccCount/${VoiceTemplateStore.MAX_SAMPLES} MFCC"
-        } else {
-            "$mfccCount/${VoiceTemplateStore.MAX_SAMPLES} MFCC templates"
-        }
+        val priorTag = if (bundledModel != null) " + CHKW-v1 مساعد (≤10%)" else ""
+        return "$mfccCount/${VoiceTemplateStore.MIN_REQUIRED_SAMPLES} عينات MFCC-DTW$priorTag"
     }
 
     private fun activeEngineLabel(settings: AssistantSettings): String {
         val mfccCount = templateStore.samples.value.count { it.mfccSequence.isNotEmpty() }
-        val usingBundled = bundledModel != null && wakeWordEngine.isUsingDefaultYaSheetaPhrase(settings)
+        val usingPrior = bundledModel != null && wakeWordEngine.isUsingDefaultYaSheetaPhrase(settings)
         return when {
-            usingBundled && mfccCount > 0 -> "BUNDLED_BIN+USER_DTW"
-            usingBundled -> "BUNDLED_CHKW_BIN ('يا شيتا')"
-            mfccCount > 0 -> "USER_MFCC_DTW"
-            else -> "TEXT_STT_GATE"
+            mfccCount >= VoiceTemplateStore.MIN_REQUIRED_SAMPLES && usingPrior -> "MFCC-DTW (أساسي) + CHKW"
+            mfccCount > 0 -> "MFCC-DTW ($mfccCount/${VoiceTemplateStore.MIN_REQUIRED_SAMPLES})"
+            settings.wakeSetupMode == WakeWordSetupMode.TEXT_TYPED -> "TEXT_STT_GATE"
+            else -> "NEEDS_5_SAMPLES"
         }
     }
 
-    private fun activeEngineLabel(repo: SettingsRepository): String {
-        val mfccCount = templateStore.samples.value.count { it.mfccSequence.isNotEmpty() }
-        return if (bundledModel != null) {
-            if (mfccCount > 0) "BUNDLED_BIN+USER_DTW" else "BUNDLED_CHKW_BIN ('يا شيتا')"
-        } else if (mfccCount > 0) {
-            "USER_MFCC_DTW"
-        } else {
-            "TEXT_STT_GATE"
-        }
-    }
-
-    private fun updateModelDiagnostics(repo: SettingsRepository) {
-        serviceScope.launch {
-            val s = repo.currentSettings()
-            CheetahRuntimeBus.updateDiagnostics {
-                it.copy(
-                    modelStatus = buildModelStatusLabel(),
-                    wakeEngineStatus = if (isMuted) "MUTED" else activeEngineLabel(s),
-                    detectionThreshold = wakeWordEngine.sensitivityToDtwThreshold(s.wakeSensitivity)
-                )
-            }
+    private fun updateModelDiagnostics(settings: AssistantSettings) {
+        CheetahRuntimeBus.updateDiagnostics {
+            it.copy(
+                modelStatus = buildModelStatusLabel(),
+                wakeEngineStatus = if (isMuted) "MUTED" else activeEngineLabel(settings),
+                detectionThreshold = wakeWordEngine.sensitivityToDtwThreshold(settings.wakeSensitivity)
+            )
         }
     }
 
@@ -929,6 +999,7 @@ class WakeWordDetectionService : Service() {
         activeCycleJob?.cancel()
         watchdogJob?.cancel()
         captureSupervisorJob?.cancel()
+        settingsCollectorJob?.cancel()
         MicrophoneArbitrator.releaseWakeAudioRecordIfHeld()
         sttManager.stopAndRelease()
         ttsManager.release()
@@ -948,14 +1019,28 @@ class WakeWordDetectionService : Service() {
         const val ACTION_TOGGLE_MUTE = "com.example.voice.action.TOGGLE_MUTE"
         const val ACTION_RELOAD_TEMPLATES = "com.example.voice.action.RELOAD_TEMPLATES"
         const val ACTION_RUN_DIAGNOSTIC_TEST = "com.example.voice.action.RUN_DIAGNOSTIC_TEST"
+        const val ACTION_CANCEL_DIAGNOSTIC_TEST = "com.example.voice.action.CANCEL_DIAGNOSTIC_TEST"
+        const val EXTRA_DIAGNOSTIC_DURATION_MS = "extra_diagnostic_duration_ms"
         const val EXTRA_FROM_WAKE_WORD = "extra_from_wake_word"
         const val EXTRA_VOICE_MATCH_SCORE = "extra_voice_match_score"
 
-        fun start(context: Context) {
+        fun start(context: Context): Boolean {
             val intent = Intent(context, WakeWordDetectionService::class.java).apply {
                 action = ACTION_START
             }
-            ContextCompat.startForegroundService(context, intent)
+            return try {
+                ContextCompat.startForegroundService(context, intent)
+                true
+            } catch (e: Exception) {
+                CheetahRuntimeBus.updateDiagnostics {
+                    it.copy(
+                        audioRecordStatus = "FGS_RESTRICTED",
+                        lastError = "ForegroundServiceStartNotAllowedException: ${e.message ?: e.javaClass.simpleName}"
+                    )
+                }
+                WakeWatchdogReceiver.postRecoveryNotification(context.applicationContext)
+                false
+            }
         }
 
         fun stop(context: Context) {
@@ -979,11 +1064,27 @@ class WakeWordDetectionService : Service() {
             runCatching { context.startService(intent) }
         }
 
-        fun runDiagnosticTest(context: Context) {
+        fun runDiagnosticTest(context: Context, durationMs: Long = 12_000L): Boolean {
             val intent = Intent(context, WakeWordDetectionService::class.java).apply {
                 action = ACTION_RUN_DIAGNOSTIC_TEST
+                putExtra(EXTRA_DIAGNOSTIC_DURATION_MS, durationMs)
             }
-            ContextCompat.startForegroundService(context, intent)
+            return try {
+                ContextCompat.startForegroundService(context, intent)
+                true
+            } catch (e: Exception) {
+                CheetahRuntimeBus.updateDiagnostics {
+                    it.copy(lastError = "تعذر تشغيل اختبار الخلفية: ${e.message ?: e.javaClass.simpleName}")
+                }
+                false
+            }
+        }
+
+        fun cancelDiagnosticTest(context: Context) {
+            val intent = Intent(context, WakeWordDetectionService::class.java).apply {
+                action = ACTION_CANCEL_DIAGNOSTIC_TEST
+            }
+            runCatching { context.startService(intent) }
         }
     }
 }

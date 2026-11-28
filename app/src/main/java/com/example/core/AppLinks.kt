@@ -26,6 +26,11 @@ object AppLinks {
             summaryAr = "محرك تشغيل نماذج GGUF محلياً بالكامل على المعالج عبر JNI بدون أي خادم."
         ),
         OssNotice(
+            component = "Vosk Android (Alpha Cephei)",
+            license = "Apache License 2.0",
+            summaryAr = "محرك التعرف المحلي على الكلام أوفلاين عبر AudioRecord 16kHz باستخدام نماذج يستوردها المستخدم بدون خدمات جوجل."
+        ),
+        OssNotice(
             component = "Jetpack Compose & AndroidX",
             license = "Apache License 2.0",
             summaryAr = "واجهة Material 3، الملاحة، DataStore، وخدمات AndroidX الأساسية."

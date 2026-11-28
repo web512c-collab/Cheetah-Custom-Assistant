@@ -17,13 +17,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Badge
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.RecordVoiceOver
@@ -213,7 +213,7 @@ fun AssistantIdentityAndVoiceCard(
                 )
             }
 
-            if (ttsStatus.usedPitchFallback) {
+            if (ttsStatus.isGoogleTtsEngine || !ttsStatus.hasOfflineVoice || ttsStatus.usedPitchFallback) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Surface(
                     color = CheetahAmber.copy(alpha = 0.14f),
@@ -221,15 +221,40 @@ fun AssistantIdentityAndVoiceCard(
                     border = BorderStroke(1.dp, CheetahAmber.copy(alpha = 0.5f))
                 ) {
                     Column(modifier = Modifier.padding(10.dp)) {
-                        Text(
-                            text = "ملاحظة: محرك الصوت الحالي لا يحتوي على صوت عربي مطابق لهذا الجنس، لذا تم تفعيل تعديل طبقة الصوت (Pitch) كبديل.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = CheetahAmber
-                        )
+                        if (ttsStatus.enginePackage.isNotBlank()) {
+                            Text(
+                                text = "محرك النطق الحالي: ${ttsStatus.enginePackage}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CheetahCyan
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                        }
+                        if (ttsStatus.isGoogleTtsEngine) {
+                            Text(
+                                text = "تنبيه: محرك النظام هو Google TTS — شيتا يفرض الأصوات الأوفلاين فقط (بدون شبكة). لتحكم محلي كامل بدون أي حزم جوجل، ثبّت محرك TTS أوفلاين (مثل RHVoice أو eSpeak NG) من إعدادات النظام.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = CheetahAmber
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+                        if (!ttsStatus.hasOfflineVoice) {
+                            Text(
+                                text = "لم يتم العثور على صوت عربي أوفلاين مثبت بعد في محرك النطق.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = CheetahCrimson
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                        } else if (ttsStatus.usedPitchFallback) {
+                            Text(
+                                text = "ملاحظة: محرك الصوت الحالي لا يحتوي على صوت عربي مطابق لهذا الجنس، لذا تم تفعيل تعديل طبقة الصوت (Pitch) كبديل.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = CheetahAmber
+                            )
+                        }
                         TextButton(onClick = onOpenSystemTtsSettings) {
-                            Icon(Icons.Default.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp), tint = CheetahCyan)
+                            Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp), tint = CheetahCyan)
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("تثبيت أصوات عربية إضافية من إعدادات TTS", color = CheetahCyan)
+                            Text("إعدادات محرك الصوت (TTS) في النظام", color = CheetahCyan)
                         }
                     }
                 }
@@ -657,9 +682,9 @@ fun KeylessInternetSearchCard(
                         )
                         Text(
                             text = if (settings.internetSearchEnabled) {
-                                "مفعّل: المحرك المختار حالياً هو ${settings.searchEngineMode.labelAr}."
+                                "مفعّل: المحرك المختار هو ${settings.searchEngineMode.labelAr}. أقفل المفتاح لوضع أوفلاين 100%."
                             } else {
-                                "مقفول افتراضياً: التطبيق أوفلاين 100% ولا يرسل أي طلبات شبكة."
+                                "مقفول: التطبيق أوفلاين 100% ولا يرسل أي طلبات شبكة."
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = CheetahTextSecondary
@@ -681,7 +706,7 @@ fun KeylessInternetSearchCard(
                 border = BorderStroke(1.dp, CheetahBorder)
             ) {
                 Text(
-                    text = "ضمان الخصوصية: عند تفعيل الميزة، يتم إرسال نص سؤال البحث فقط عبر HTTPS بدون أي مفاتيح API أو خدمات مدفوعة، ولا يتم إرسال الصوت أو السجل أو أي بيانات شخصية مطلقاً.",
+                    text = "ضمان الخصوصية: البحث مفعّل افتراضياً للاستفسارات المعرفية العامة، وباستثناء هذا الخيار فكل التطبيق أوفلاين تماماً. فقط نص سؤال البحث المنظف يخرج عبر HTTPS (ومقتطفات <= 120 KB عند التفعيل) بدون مفاتيح API أو بيانات صوتية أو شخصية.",
                     style = MaterialTheme.typography.bodySmall,
                     color = CheetahTextSecondary,
                     modifier = Modifier.padding(10.dp)

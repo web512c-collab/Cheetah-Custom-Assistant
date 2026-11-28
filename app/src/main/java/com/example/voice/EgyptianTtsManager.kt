@@ -31,6 +31,8 @@ data class TtsStatus(
     val activeVoiceGender: AssistantGender? = null,
     val usedPitchFallback: Boolean = false,
     val availableArabicVoices: List<TtsVoiceCandidate> = emptyList(),
+    val enginePackage: String = "",
+    val isGoogleTtsEngine: Boolean = false,
     val statusDetailAr: String = "جاري تجهيز محرك الصوت المصري..."
 )
 
@@ -69,6 +71,7 @@ class EgyptianTtsManager(context: Context) : TextToSpeech.OnInitListener {
         if (status != TextToSpeech.SUCCESS) {
             _status.value = TtsStatus(
                 isReady = false,
+                enginePackage = runCatching { tts?.defaultEngine.orEmpty() }.getOrDefault(""),
                 statusDetailAr = "محرك النطق المحلي مش متاح حالياً على الجهاز."
             )
             return
@@ -124,33 +127,37 @@ class EgyptianTtsManager(context: Context) : TextToSpeech.OnInitListener {
         voiceGender: AssistantGender,
         selectedVoiceName: String
     ) {
+        val enginePkg = runCatching { engine.defaultEngine.orEmpty() }.getOrDefault("")
+        val isGoogleEngine = enginePkg.contains("com.google.android.tts", ignoreCase = true)
         val egyptLocale = Locale.forLanguageTag("ar-EG")
         val arFallback = Locale.forLanguageTag("ar")
         val voices = runCatching { engine.voices?.toList().orEmpty() }.getOrDefault(emptyList())
 
-        val arabicVoices = voices.filter { it.locale.language.equals("ar", ignoreCase = true) }
-        val candidates = arabicVoices.map { voice ->
+        // Strict offline enforcement: ignore any network-required TTS voice
+        val offlineArabicVoices = voices.filter {
+            it.locale.language.equals("ar", ignoreCase = true) && !it.isNetworkConnectionRequired
+        }
+        val candidates = offlineArabicVoices.map { voice ->
             TtsVoiceCandidate(
                 name = voice.name,
                 localeTag = voice.locale.toLanguageTag(),
                 detectedGender = detectVoiceGender(voice),
-                isOffline = !voice.isNetworkConnectionRequired,
+                isOffline = true,
                 qualityScore = voice.quality
             )
         }.sortedWith(
             compareByDescending<TtsVoiceCandidate> { it.localeTag.equals("ar-EG", ignoreCase = true) }
-                .thenByDescending { it.isOffline }
                 .thenByDescending { it.qualityScore }
                 .thenBy { it.name }
         )
 
         val manualMatch = selectedVoiceName.takeIf { it.isNotBlank() }?.let { wanted ->
-            arabicVoices.firstOrNull { it.name == wanted } ?: voices.firstOrNull { it.name == wanted }
+            offlineArabicVoices.firstOrNull { it.name == wanted }
         }
 
-        val matchingGenderVoices = arabicVoices.filter { detectVoiceGender(it) == voiceGender }
+        val matchingGenderVoices = offlineArabicVoices.filter { detectVoiceGender(it) == voiceGender }
         val autoVoice = pickBestEgyptianOrArabicVoice(matchingGenderVoices)
-            ?: pickBestEgyptianOrArabicVoice(arabicVoices)
+            ?: pickBestEgyptianOrArabicVoice(offlineArabicVoices)
 
         val selectedVoice = manualMatch ?: autoVoice
         val detectedSelectedGender = selectedVoice?.let { detectVoiceGender(it) }
@@ -158,15 +165,15 @@ class EgyptianTtsManager(context: Context) : TextToSpeech.OnInitListener {
             (detectedSelectedGender == voiceGender)
         val usedPitchFallback = !matchedRequestedGender
 
-        val hasEgypt = arabicVoices.any { isEgyptianVoice(it) } ||
-            engine.isLanguageAvailable(egyptLocale) >= TextToSpeech.LANG_AVAILABLE
-        val hasOffline = arabicVoices.any { !it.isNetworkConnectionRequired }
+        val hasOffline = offlineArabicVoices.isNotEmpty()
+        val hasEgypt = offlineArabicVoices.any { isEgyptianVoice(it) } ||
+            (hasOffline && engine.isLanguageAvailable(egyptLocale) >= TextToSpeech.LANG_AVAILABLE)
 
         val chosenLocale = when {
             selectedVoice != null -> selectedVoice.locale
             hasEgypt -> egyptLocale
-            engine.isLanguageAvailable(arFallback) >= TextToSpeech.LANG_AVAILABLE -> arFallback
-            else -> Locale.getDefault()
+            hasOffline -> arFallback
+            else -> egyptLocale
         }
 
         engine.language = chosenLocale
@@ -176,18 +183,19 @@ class EgyptianTtsManager(context: Context) : TextToSpeech.OnInitListener {
 
         val detail = buildString {
             when {
-                selectedVoice != null && isEgyptianVoice(selectedVoice) && !selectedVoice.isNetworkConnectionRequired ->
+                selectedVoice != null && isEgyptianVoice(selectedVoice) ->
                     append("صوت مصري أوفلاين جاهز (${selectedVoice.name}).")
-                hasEgypt ->
-                    append("صوت عربي متاح (${chosenLocale.toLanguageTag()}).")
-                hasOffline ->
-                    append("صوت عربي أوفلاين (${chosenLocale.toLanguageTag()}) — يفضل تنزيل ar-EG من إعدادات TTS.")
+                selectedVoice != null ->
+                    append("صوت عربي أوفلاين (${selectedVoice.name} • ${chosenLocale.toLanguageTag()}).")
                 else ->
-                    append("صوت النظام (${chosenLocale.toLanguageTag()}) — نزّل حزمة العربية من إعدادات TTS.")
+                    append("لا يوجد صوت عربي أوفلاين مثبت على المحرك (${enginePkg.ifBlank { "النظام" }}) — نزّل حزمة صوت أوفلاين أو ثبّت محرك مثل RHVoice.")
             }
-            if (usedPitchFallback) {
+            if (usedPitchFallback && hasOffline) {
                 val wantedLabel = if (voiceGender == AssistantGender.FEMALE) "أنثوي" else "رجالي"
-                append(" لم يُعثر على صوت عربي $wantedLabel مثبّت، وتم تفعيل تعديل طبقة الصوت (Pitch) كبديل.")
+                append(" لم يُعثر على صوت عربي $wantedLabel أوفلاين، وتم تفعيل تعديل طبقة الصوت (Pitch).")
+            }
+            if (isGoogleEngine) {
+                append(" تنبيه: محرك Google TTS النشط حالياً؛ يفضّل التبديل لمحرك أوفلاين (مثل RHVoice) لضمان استقلال كامل.")
             }
         }
 
@@ -200,16 +208,17 @@ class EgyptianTtsManager(context: Context) : TextToSpeech.OnInitListener {
             activeVoiceGender = detectedSelectedGender,
             usedPitchFallback = usedPitchFallback,
             availableArabicVoices = candidates,
+            enginePackage = enginePkg,
+            isGoogleTtsEngine = isGoogleEngine,
             statusDetailAr = detail
         )
     }
 
     private fun pickBestEgyptianOrArabicVoice(list: List<Voice>): Voice? {
-        if (list.isEmpty()) return null
-        return list.firstOrNull { isEgyptianVoice(it) && !it.isNetworkConnectionRequired }
-            ?: list.firstOrNull { isEgyptianVoice(it) }
-            ?: list.firstOrNull { !it.isNetworkConnectionRequired }
-            ?: list.firstOrNull()
+        val offlineOnly = list.filter { !it.isNetworkConnectionRequired }
+        if (offlineOnly.isEmpty()) return null
+        return offlineOnly.firstOrNull { isEgyptianVoice(it) }
+            ?: offlineOnly.firstOrNull()
     }
 
     private fun isEgyptianVoice(voice: Voice): Boolean {

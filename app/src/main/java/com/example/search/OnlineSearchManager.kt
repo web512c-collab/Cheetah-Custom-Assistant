@@ -23,11 +23,12 @@ import java.net.URLEncoder
 import java.util.LinkedHashMap
 
 /**
- * Keyless HTTPS multi-engine parallel internet search manager (v0.5.0 Part 5).
+ * Keyless HTTPS multi-engine parallel internet search manager (v0.5.1).
  *
  * Privacy & security guarantees:
- * 1. Strictly gated behind settings.internetSearchEnabled (OFF by default).
- * 2. Sends ONLY the cleaned search query text (never mic audio, conversation memory, or PII).
+ * 1. Strictly gated behind settings.internetSearchEnabled (ON by default in v0.5.1; single toggle in Settings).
+ * 2. Sends ONLY the cleaned search query text (and optional <= 120 KB public HTTPS excerpts when enabled;
+ *    never mic audio, conversation memory, or PII). This is the ONLY module in the app permitted to open network sockets.
  * 3. HTTPS-only with explicit connect/read timeouts, User-Agent, LRU TTL cache, and rate limiter.
  * 4. Honest keyless endpoint disclosure (never scrapes Google or Bing):
  *    - DuckDuckGo: Instant Answer public JSON API + DuckDuckGo HTML public endpoint (parsed gracefully).
@@ -49,7 +50,7 @@ object OnlineSearchManager {
     private const val MAX_CACHE_SIZE = 24
     private const val MIN_REQUEST_INTERVAL_MS = 1_200L
     private const val DEFAULT_PER_ENGINE_TIMEOUT_MS = 7_500L
-    private const val USER_AGENT = "SheetaCustomAssistant/0.5.0 (Android; KeylessSearch)"
+    private const val USER_AGENT = "SheetaCustomAssistant/0.5.1 (Android; KeylessSearch)"
 
     private val DDG_HTML_LINK_REGEX = Regex(
         """(?is)<a[^>]*class=["'][^"']*result__a[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>"""
@@ -359,11 +360,17 @@ object OnlineSearchManager {
             outcome
         } catch (t: Throwable) {
             val totalElapsedMs = (clockMs() - startTimeMs).coerceAtLeast(0L)
+            val reasonAr = when (t) {
+                is java.net.UnknownHostException -> "لا يوجد اتصال بالإنترنت أو تعذر الوصول لخادم البحث"
+                is java.net.SocketTimeoutException -> "انتهت مهلة الاتصال بمصدر البحث"
+                is java.net.ConnectException -> "تعذر فتح اتصال HTTPS بمصدر البحث"
+                else -> t.message ?: "network error"
+            }
             WebSearchOutcome(
                 query = cleanQuery,
                 summaryText = "",
                 sources = emptyList(),
-                errorAr = "تعذر الاتصال بمصدر البحث (${t.message ?: "network error"}).",
+                errorAr = "تعذر البحث على الإنترنت ($reasonAr).",
                 responseTimeMs = totalElapsedMs
             )
         } finally {

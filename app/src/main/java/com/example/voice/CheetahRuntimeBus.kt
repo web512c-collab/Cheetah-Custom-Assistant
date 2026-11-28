@@ -22,6 +22,14 @@ data class WakeTriggerEvent(
     val source: String
 )
 
+data class WakeEvalTelemetry(
+    val detected: Boolean,
+    val confidence: Float,
+    val threshold: Float,
+    val source: String,
+    val timestampMs: Long
+)
+
 /**
  * In-process reactive telemetry bus bridging WakeWordDetectionService,
  * LocalLlmManager, AssistantBrain, OnlineSearchManager, VoiceInteractionSession,
@@ -56,6 +64,9 @@ object CheetahRuntimeBus {
 
     private val _wakeEvents = MutableSharedFlow<WakeTriggerEvent>(extraBufferCapacity = 8)
     val wakeEvents: SharedFlow<WakeTriggerEvent> = _wakeEvents.asSharedFlow()
+
+    private val _wakeEvalEvents = MutableSharedFlow<WakeEvalTelemetry>(extraBufferCapacity = 16)
+    val wakeEvalEvents: SharedFlow<WakeEvalTelemetry> = _wakeEvalEvents.asSharedFlow()
 
     private val _localLlmStatus = MutableStateFlow(LocalLlmRuntimeStatus())
     val localLlmStatus: StateFlow<LocalLlmRuntimeStatus> = _localLlmStatus.asStateFlow()
@@ -196,5 +207,9 @@ object CheetahRuntimeBus {
             )
         }
         _wakeEvents.tryEmit(event)
+    }
+
+    fun emitWakeEval(event: WakeEvalTelemetry) {
+        _wakeEvalEvents.tryEmit(event)
     }
 }

@@ -10,8 +10,4 @@
     <string name="notification_listening_body">Offline on-device listening for your wake phrase.</string>
     <string name="notification_action_mute">كتم مؤقت</string>
     <string name="notification_action_stop">إيقاف</string>
-    <string name="ai_brain_section_title">Local AI Brain &amp; Thinking Settings</string>
-    <string name="ai_brain_stop_generation">Stop Generation</string>
-    <string name="ai_brain_continue_reading">Continue Reading</string>
-    <string name="ai_brain_test_model">Test the model</string>
 </resources>

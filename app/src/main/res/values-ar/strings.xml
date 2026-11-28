@@ -10,8 +10,4 @@
     <string name="notification_listening_body">الاستماع أوفلاين على الجهاز لكلمة التنبيه الخاصة بك.</string>
     <string name="notification_action_mute">كتم مؤقت</string>
     <string name="notification_action_stop">إيقاف</string>
-    <string name="ai_brain_section_title">عقل المساعد الذكي وإعدادات التفكير</string>
-    <string name="ai_brain_stop_generation">إيقاف التوليد</string>
-    <string name="ai_brain_continue_reading">أكمل القراءة</string>
-    <string name="ai_brain_test_model">اختبار النموذج المحلي</string>
 </resources>
