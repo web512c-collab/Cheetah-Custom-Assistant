@@ -27,3 +27,4 @@ captures/
 # Keystores & Secrets
 *.keystore
 *.jks
+!debug.keystore.base64

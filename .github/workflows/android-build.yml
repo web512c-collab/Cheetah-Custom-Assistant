@@ -18,6 +18,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: android-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Build & Test Sheeta APK
@@ -26,6 +30,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 17 (Temurin)
         uses: actions/setup-java@v4
@@ -50,24 +56,72 @@ jobs:
       - name: Set up Gradle & cache
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Ensure gradlew is executable & debug keystore exists
+      - name: Ensure gradlew is executable & debug keystore exists (self-healing)
         run: |
           chmod +x gradlew
-          if [ ! -f debug.keystore ]; then
-            if [ -f debug.keystore.base64 ]; then
-              base64 -d debug.keystore.base64 > debug.keystore
-            else
-              echo "::error::Both debug.keystore and debug.keystore.base64 are missing. Refusing to generate a mismatched keystore."
-              exit 1
+
+          if [ -f debug.keystore.base64 ]; then
+            echo "Found tracked debug.keystore.base64 — decoding without regenerating or overwriting."
+            base64 -d debug.keystore.base64 > debug.keystore
+          else
+            echo "::warning title=Missing debug.keystore.base64::debug.keystore.base64 was not found; generating a deterministic debug keystore."
+            keytool -genkeypair \
+              -keystore debug.keystore \
+              -storetype JKS \
+              -alias androiddebugkey \
+              -storepass android \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Sheeta Debug,O=Sheeta,C=EG"
+
+            base64 < debug.keystore | tr -d '\n' > debug.keystore.base64
+
+            PERSISTED="false"
+            if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+              git fetch origin main >/dev/null 2>&1 || true
+              if git ls-tree -r --name-only origin/main 2>/dev/null | grep -qx "debug.keystore.base64"; then
+                echo "A concurrent run already committed debug.keystore.base64 to origin/main — adopting remote key."
+                git checkout origin/main -- debug.keystore.base64
+                base64 -d debug.keystore.base64 > debug.keystore
+                PERSISTED="true"
+              else
+                git add -f debug.keystore.base64
+                if git commit -m "ci: add stable debug signing key [skip ci]"; then
+                  if git pull --rebase origin main && git push origin HEAD:main; then
+                    echo "Persisted debug.keystore.base64 to origin/main."
+                    PERSISTED="true"
+                  else
+                    git rebase --abort >/dev/null 2>&1 || true
+                  fi
+                fi
+              fi
+            fi
+
+            if [ "$PERSISTED" != "true" ]; then
+              echo "========================================================================"
+              echo "WARNING: debug.keystore.base64 was NOT persisted to the repository!"
+              echo "This APK is signed with an ephemeral debug key and will NOT install as"
+              echo "an in-place update over previous APKs."
+              echo "========================================================================"
+              echo "::warning title=Signing Key Not Saved::debug.keystore.base64 was generated for this run but could not be pushed (non-main ref, tag run, or protected branch). This APK will NOT install as an update over previous builds."
             fi
           fi
+
+          echo "=== Debug Keystore SHA-256 Certificate Fingerprint ==="
+          keytool -list -v -keystore debug.keystore -storepass android -alias androiddebugkey \
+            | grep -E '^\s*(Alias name:|Owner:|SHA256:)' || true
 
       - name: Resolve release metadata and version tag
         id: release_meta
         run: |
           EVENT_NAME="${{ github.event_name }}"
-          INPUT_TAG="${{ github.event.inputs.tag }}"
-          RELEASE_EVENT_TAG="${{ github.event.release.tag_name }}"
+          INPUT_TAG=$(printf '%s' "${{ github.event.inputs.tag }}" | tr -d '[:space:]')
+          RELEASE_EVENT_TAG=$(printf '%s' "${{ github.event.release.tag_name }}" | tr -d '[:space:]')
           APP_VER=$(grep -E 'versionName\s*=' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
 
           if [ "$EVENT_NAME" = "release" ] && [ -n "$RELEASE_EVENT_TAG" ]; then
@@ -125,6 +179,14 @@ jobs:
           if [ ! -s "$DEST_APK" ]; then
             echo "::error::Failed to produce non-empty versioned APK at $DEST_APK"
             exit 1
+          fi
+
+          APKSIGNER=$(find "${ANDROID_SDK_ROOT}/build-tools" -maxdepth 2 -name apksigner -type f 2>/dev/null | sort -V | tail -n 1 || true)
+          if [ -n "$APKSIGNER" ]; then
+            echo "=== APK Signer Certificate Verification ($APK_NAME) ==="
+            "$APKSIGNER" verify --print-certs "$DEST_APK"
+          else
+            echo "::warning::apksigner not found under ${ANDROID_SDK_ROOT}/build-tools"
           fi
 
           ls -lh dist/
